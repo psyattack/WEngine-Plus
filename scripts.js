@@ -818,6 +818,7 @@
       }).then(function (r) {
         return r.json();
       });
+    },
     loginWithCookie: function (req) {
       return fetch(this.url + "/api/auth/cookie", {
         method: "POST",
