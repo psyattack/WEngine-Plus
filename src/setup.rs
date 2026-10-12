@@ -1,0 +1,423 @@
+use std::fs;
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+
+const SCRIPTS_CONTENT: &str = include_str!("../scripts.js");
+
+#[cfg(windows)]
+fn setup_console() -> bool {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::*;
+
+    unsafe {
+        let attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+        let created = if !attached {
+            AllocConsole() != 0
+        } else {
+            false
+        };
+
+        if let Ok(conout) = fs::OpenOptions::new().write(true).read(true).open("CONOUT$") {
+            let handle = conout.into_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+            SetStdHandle(STD_OUTPUT_HANDLE, handle);
+            SetStdHandle(STD_ERROR_HANDLE, handle);
+        }
+
+        if created {
+            if let Ok(conin) = fs::OpenOptions::new().read(true).open("CONIN$") {
+                let handle = conin.into_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+                SetStdHandle(STD_INPUT_HANDLE, handle);
+            }
+        }
+
+        let title: Vec<u16> = "WEngine Plus - Setup\0".encode_utf16().collect();
+        SetConsoleTitleW(title.as_ptr());
+
+        created
+    }
+}
+
+#[cfg(not(windows))]
+fn setup_console() -> bool { false }
+
+fn wait_for_enter(should_wait: bool) {
+    if should_wait {
+        println!("\nPress Enter to exit...");
+        let stdin = io::stdin();
+        let mut line = String::new();
+        let _ = stdin.lock().read_line(&mut line);
+    }
+}
+
+#[cfg(windows)]
+fn query_reg_string(hkey: windows_sys::Win32::System::Registry::HKEY, subkey: &str, value_name: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::*;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+
+    let subkey_w: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let val_w: Vec<u16> = value_name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut key: HKEY = std::ptr::null_mut();
+    unsafe {
+        if RegOpenKeyExW(hkey, subkey_w.as_ptr(), 0, KEY_READ, &mut key) != ERROR_SUCCESS
+            && RegOpenKeyExW(hkey, subkey_w.as_ptr(), 0, KEY_READ | KEY_WOW64_32KEY, &mut key) != ERROR_SUCCESS
+            && RegOpenKeyExW(hkey, subkey_w.as_ptr(), 0, KEY_READ | KEY_WOW64_64KEY, &mut key) != ERROR_SUCCESS
+        {
+            return None;
+        }
+
+        let mut buf_len: u32 = 0;
+        let mut val_type: u32 = 0;
+        if RegQueryValueExW(key, val_w.as_ptr(), std::ptr::null_mut(), &mut val_type, std::ptr::null_mut(), &mut buf_len) != ERROR_SUCCESS {
+            RegCloseKey(key);
+            return None;
+        }
+
+        let mut buf = vec![0u8; buf_len as usize];
+        if RegQueryValueExW(key, val_w.as_ptr(), std::ptr::null_mut(), &mut val_type, buf.as_mut_ptr(), &mut buf_len) != ERROR_SUCCESS {
+            RegCloseKey(key);
+            return None;
+        }
+
+        RegCloseKey(key);
+
+        if val_type == REG_SZ || val_type == REG_EXPAND_SZ {
+            let u16_slice = std::slice::from_raw_parts(buf.as_ptr() as *const u16, buf.len() / 2);
+            let s = String::from_utf16_lossy(u16_slice);
+            Some(s.trim_matches('\0').trim().to_string())
+        } else {
+            None
+        }
+    }
+}
+
+fn resolve_scripts_dir(path: &Path) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    // Direct folder containing scripts.js
+    if path.join("scripts.js").exists() {
+        return Some(path.to_path_buf());
+    }
+    // Standard Wallpaper Engine layout: <root>/ui/dist/scripts
+    let sub_ui = path.join("ui").join("dist").join("scripts");
+    if sub_ui.join("scripts.js").exists() {
+        return Some(sub_ui);
+    }
+    let sub_dist = path.join("dist").join("scripts");
+    if sub_dist.join("scripts.js").exists() {
+        return Some(sub_dist);
+    }
+    let sub_scripts = path.join("scripts");
+    if sub_scripts.join("scripts.js").exists() {
+        return Some(sub_scripts);
+    }
+    None
+}
+
+fn find_wallpaper_engine_scripts() -> Option<PathBuf> {
+    // 1. Running Wallpaper Engine process
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    for p in sys.processes().values() {
+        let name = p.name().to_string_lossy().to_lowercase();
+        if name == "wallpaper64.exe" || name == "wallpaper32.exe" {
+            if let Some(exe_path) = p.exe() {
+                if let Some(parent) = exe_path.parent() {
+                    if let Some(res) = resolve_scripts_dir(parent) {
+                        return Some(res);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Windows Registry (Steam App 431960 Uninstall Key)
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Registry::*;
+        let uninstall_subkeys = [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 431960",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 431960",
+        ];
+        for sub in &uninstall_subkeys {
+            if let Some(loc) = query_reg_string(HKEY_LOCAL_MACHINE, sub, "InstallLocation") {
+                if let Some(res) = resolve_scripts_dir(&PathBuf::from(loc)) {
+                    return Some(res);
+                }
+            }
+            if let Some(loc) = query_reg_string(HKEY_CURRENT_USER, sub, "InstallLocation") {
+                if let Some(res) = resolve_scripts_dir(&PathBuf::from(loc)) {
+                    return Some(res);
+                }
+            }
+        }
+
+        // Steam paths & libraryfolders.vdf
+        let steam_subkeys = [
+            (HKEY_CURRENT_USER, r"Software\Valve\Steam"),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam"),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
+        ];
+        let mut steam_roots = Vec::new();
+        for (hkey, sub) in &steam_subkeys {
+            if let Some(p) = query_reg_string(*hkey, sub, "SteamPath") {
+                steam_roots.push(PathBuf::from(p));
+            }
+            if let Some(p) = query_reg_string(*hkey, sub, "InstallPath") {
+                steam_roots.push(PathBuf::from(p));
+            }
+        }
+        for root in steam_roots {
+            let cand = root.join("steamapps").join("common").join("wallpaper_engine");
+            if let Some(res) = resolve_scripts_dir(&cand) {
+                return Some(res);
+            }
+            let vdf_path = root.join("steamapps").join("libraryfolders.vdf");
+            if vdf_path.exists() {
+                if let Ok(content) = fs::read_to_string(&vdf_path) {
+                    if let Ok(re) = regex::Regex::new(r#""path"\s+"([^"]+)""#) {
+                        for cap in re.captures_iter(&content) {
+                            if let Some(m) = cap.get(1) {
+                                let lib_str = m.as_str().replace(r"\\", r"\");
+                                let lib_cand = PathBuf::from(lib_str).join("steamapps").join("common").join("wallpaper_engine");
+                                if let Some(res) = resolve_scripts_dir(&lib_cand) {
+                                    return Some(res);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Common directory locations across all drives
+    let mut candidates = vec![
+        PathBuf::from(r"C:\Program Files\Wallpaper Engine"),
+        PathBuf::from(r"C:\Program Files (x86)\Wallpaper Engine"),
+        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\wallpaper_engine"),
+        PathBuf::from(r"C:\Program Files\Steam\steamapps\common\wallpaper_engine"),
+    ];
+    for drive in b'C'..=b'Z' {
+        let letter = drive as char;
+        candidates.push(PathBuf::from(format!(r"{}:\SteamLibrary\steamapps\common\wallpaper_engine", letter)));
+        candidates.push(PathBuf::from(format!(r"{}:\Steam\steamapps\common\wallpaper_engine", letter)));
+        candidates.push(PathBuf::from(format!(r"{}:\Games\Steam\steamapps\common\wallpaper_engine", letter)));
+        candidates.push(PathBuf::from(format!(r"{}:\Games\Wallpaper Engine", letter)));
+        candidates.push(PathBuf::from(format!(r"{}:\Wallpaper Engine", letter)));
+    }
+    for cand in candidates {
+        if let Some(res) = resolve_scripts_dir(&cand) {
+            return Some(res);
+        }
+    }
+
+    // 4. GUI Folder Browser Dialog fallback
+    println!("[!] Wallpaper Engine folder was not detected automatically.");
+    println!("[!] Opening folder picker dialog...");
+
+    let ps_output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object Windows.Forms.FolderBrowserDialog; $d.Description = 'Select Wallpaper Engine folder (or ui\\dist\\scripts)'; $f = New-Object Windows.Forms.Form -Property @{TopMost=$true}; if ($d.ShowDialog($f) -eq 'OK') { Write-Output $d.SelectedPath }"
+        ])
+        .output();
+
+    if let Ok(out) = ps_output {
+        let selected = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !selected.is_empty() {
+            if let Some(res) = resolve_scripts_dir(&PathBuf::from(selected)) {
+                return Some(res);
+            }
+        }
+    }
+
+    // 5. Console fallback
+    println!();
+    println!("[?] Please enter the path to Wallpaper Engine (or ui\\dist\\scripts) manually:");
+    print!("Path: ");
+    let _ = io::stdout().flush();
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_ok() {
+        let clean = input.trim().trim_matches('"').trim_matches('\'');
+        if !clean.is_empty() {
+            if let Some(res) = resolve_scripts_dir(&PathBuf::from(clean)) {
+                return Some(res);
+            }
+        }
+    }
+
+    None
+}
+
+fn kill_other_helper_instances() {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let my_pid = sysinfo::get_current_pid().ok();
+
+    for (pid, p) in sys.processes() {
+        if Some(*pid) == my_pid {
+            continue;
+        }
+        let name = p.name().to_string_lossy().to_lowercase();
+        if name == "wengine-helper.exe" || name == "wengine-helper" {
+            p.kill();
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+fn install_scripts_file(scripts_path: &Path, should_wait: bool) {
+    let existing_content = fs::read_to_string(scripts_path).unwrap_or_default();
+
+    // Check if script already matches embedded content (up-to-date)
+    if existing_content == SCRIPTS_CONTENT {
+        println!("[*] scripts.js is already up to date.");
+        return;
+    }
+
+    // Create safety backup once if not already present
+    let backup_path = scripts_path.with_file_name("scripts.js.bak");
+    if !backup_path.exists() && !existing_content.is_empty() {
+        print!("[*] Creating backup ({}) ... ", backup_path.file_name().unwrap_or_default().to_string_lossy());
+        match fs::write(&backup_path, existing_content.as_bytes()) {
+            Ok(_) => println!("OK"),
+            Err(e) => {
+                println!("FAILED ({})", e);
+                println!("[-] Warning: Could not create backup. Aborting for safety.");
+                wait_for_enter(should_wait);
+                std::process::exit(1);
+            }
+        }
+    } else if backup_path.exists() {
+        println!("[*] Existing backup found: {}", backup_path.display());
+    }
+
+    // Write updated scripts.js
+    print!("[*] Writing updated scripts.js ... ");
+    match fs::write(scripts_path, SCRIPTS_CONTENT.as_bytes()) {
+        Ok(_) => println!("OK"),
+        Err(e) => {
+            println!("FAILED ({})", e);
+            println!("[-] ERROR: Failed to write scripts.js.");
+            wait_for_enter(should_wait);
+            std::process::exit(1);
+        }
+    }
+}
+
+pub fn run_setup_mode(auto_confirm: bool) {
+    let is_new_window = setup_console();
+    let should_wait = is_new_window || (!auto_confirm);
+
+    println!();
+    println!("==============================================================");
+    println!("                     WEngine Plus - Setup                     ");
+    println!("==============================================================");
+    println!();
+
+    let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("wengine-helper.exe"));
+    let exe_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // 1. Locate target scripts directory (Unified Single Flow)
+    println!("[1/3] Locating Wallpaper Engine scripts directory...");
+
+    let target_dir = if exe_dir.join("scripts.js").exists() {
+        // Fast path: already located directly in the scripts directory!
+        exe_dir.clone()
+    } else if current_dir.join("scripts.js").exists() && (exe_dir.ends_with("release") || exe_dir.ends_with("debug")) {
+        // Development environment
+        current_dir.clone()
+    } else {
+        // Auto-discover via processes, registry, VDF, and disks
+        match find_wallpaper_engine_scripts() {
+            Some(dir) => dir,
+            None => {
+                println!();
+                println!("[-] ERROR: Could not locate Wallpaper Engine scripts directory.");
+                println!("    Please manually place wengine-helper.exe into:");
+                println!(r"    <Wallpaper Engine>\ui\dist\scripts\");
+                wait_for_enter(should_wait);
+                std::process::exit(1);
+            }
+        }
+    };
+
+    println!("[+] Target directory: {}", target_dir.display());
+
+    // 2. Synchronize binary into target directory
+    println!("[2/3] Installing wengine-helper daemon...");
+    let target_exe = target_dir.join("wengine-helper.exe");
+
+    let is_already_installed = if let (Ok(src_can), Ok(tgt_can)) = (exe_path.canonicalize(), target_exe.canonicalize()) {
+        src_can == tgt_can
+    } else {
+        exe_path == target_exe
+    };
+
+    if !is_already_installed {
+        // Terminate any running helper processes to prevent sharing violation
+        kill_other_helper_instances();
+
+        // Copy binary to target
+        if let Err(e) = fs::copy(&exe_path, &target_exe) {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                println!("[!] Administrator permissions required to write to target directory.");
+                println!("[!] Requesting elevation...");
+                let _ = std::process::Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-Command",
+                        &format!("Start-Process -FilePath '{}' -Verb RunAs", exe_path.display())
+                    ])
+                    .status();
+                std::process::exit(0);
+            } else {
+                println!("[-] ERROR copying binary: {}", e);
+                wait_for_enter(should_wait);
+                std::process::exit(1);
+            }
+        }
+        println!("[+] Binary installed to: {}", target_exe.display());
+
+        // Schedule deletion of original source binary upon exit
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let pid = std::process::id();
+            let escaped_path = exe_path.to_string_lossy().replace('\'', "''");
+            let ps_script = format!(
+                "$p = Get-Process -Id {} -ErrorAction SilentlyContinue; if ($p) {{ $p.WaitForExit(120000) }}; for ($i = 0; $i -lt 30; $i++) {{ Start-Sleep -Milliseconds 250; try {{ [System.IO.File]::Delete('{}'); break }} catch {{}} }}",
+                pid, escaped_path
+            );
+
+            let mut cmd = std::process::Command::new("powershell");
+            cmd.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_script]);
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            let _ = cmd.spawn();
+        }
+    } else {
+        println!("[*] Binary is already installed in target directory.");
+    }
+
+    // 3. Install scripts.js
+    println!("[3/3] Installing scripts.js...");
+    let target_scripts = target_dir.join("scripts.js");
+    install_scripts_file(&target_scripts, should_wait);
+
+    // 4. Completion
+    println!();
+    println!("==============================================================");
+    println!("[SUCCESS] WEngine Plus successfully installed and ready!       ");
+    println!("==============================================================");
+    println!("[*] You can now launch Wallpaper Engine normally.");
+    if !is_already_installed {
+        println!("[*] Temporary installer will be cleaned up upon exit.");
+    }
+
+    wait_for_enter(should_wait);
+    std::process::exit(0);
+}

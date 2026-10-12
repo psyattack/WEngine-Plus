@@ -16,7 +16,7 @@ use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 
 mod auth;
-mod patcher;
+mod setup;
 mod services;
 mod steam;
 
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 
     if !is_daemon {
         let auto_confirm = args.iter().any(|a| a == "-y" || a == "--yes");
-        patcher::run_patch_mode(auto_confirm);
+        setup::run_setup_mode(auto_confirm);
         return Ok(());
     }
 

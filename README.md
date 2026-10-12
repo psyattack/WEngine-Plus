@@ -7,10 +7,6 @@
   [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?logo=opensourceinitiative&logoColor=white)](LICENSE)
   [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0wIDMuNDQ5TDkuNzUgMi4xdjkuNDVIMFYzLjQ0OXpNMCAxMi40NWg5Ljc1djkuNDVMMCAyMC41NTF2LTguMTAxek0xMS4yNSAxLjg5bDEyLjc1LTEuODl2MTEuNDVoLTEyLjc1VjEuODl6bTEyLjc1IDEwLjU2djExLjQ1bC0xMi43NS0xLjg5di05LjU2aDEyLjc1eiIvPjwvc3ZnPg==)](https://www.microsoft.com/windows)
   [![Rust](https://img.shields.io/badge/Rust-%3E%3D1.75-black?logo=rust&logoColor=white)](https://www.rust-lang.org)
-  [![Axum](https://img.shields.io/badge/Axum-v0.8-38BDF8?logoColor=white)](https://github.com/tokio-rs/axum)
-  [![Tokio](https://img.shields.io/badge/Tokio-v1-FF4088?logoColor=white)](https://tokio.rs)
-
-  [English version](README.md) • [Русская версия](README.ru.md)
 
 </div>
 
@@ -114,14 +110,11 @@ For a complete, line-by-line technical audit of all changes between the original
 #### Installation Steps
 
 1. Download the latest `wengine-helper.exe` from [**Releases**](https://github.com/psyattack/WEngine-Plus/releases).
-2. Place `wengine-helper.exe` into your Wallpaper Engine scripts directory:
-   ```text
-   C:\Program Files\Wallpaper Engine\ui\dist\scripts\
-   ```
-3. Run `wengine-helper.exe`:
-   - It will detect `scripts.js`, create a backup (`scripts.js.bak`), and apply the patch.
+2. Run `wengine-helper.exe`:
+   - It automatically locates your Wallpaper Engine directory (via running processes, Steam registry, and standard paths).
+   - It copies itself to `ui\dist\scripts\wengine-helper.exe`, creates a safety backup (`scripts.js.bak`), applies the patch, and cleans up the downloaded file from your original location.
    - Press **Enter** to close the window.
-4. Launch **Wallpaper Engine** normally.
+3. Launch **Wallpaper Engine** normally.
 
 > [!NOTE]
 > Wallpaper Engine automatically launches `wengine-helper.exe` in the background with the `--daemon` flag upon startup. You do not need to start it manually.
@@ -209,7 +202,7 @@ WEngine-Plus/
 │
 └── src/                              # Backend Rust source code
     ├── main.rs                       # Daemon entry point, CLI routing & Axum server
-    ├── patcher.rs                    # Automated script patcher & backup manager
+    ├── setup.rs                      # Automated one-click installer & script manager
     ├── auth.rs                       # Auth module declarations
     ├── services.rs                   # Services module declarations
     ├── steam.rs                      # Steam module declarations

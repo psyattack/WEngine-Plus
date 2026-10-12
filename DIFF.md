@@ -8,16 +8,16 @@ This document provides a complete, structured, and exhaustive technical comparis
 
 | Metric | Original | Current | Delta |
 | :--- | :--- | :--- | :--- |
-| **File Size** | 1,186,902 bytes (~1.18 MB) | 2,091,069 bytes (~2.09 MB) | +904,167 bytes (+76.2%) |
-| **Line Count (raw)** | 48 lines (minified) | 39,122 lines (formatted) | Unminified + extended |
+| **File Size** | 1,186,902 bytes (~1.18 MB) | 2,094,222 bytes (~2.09 MB) | +907,320 bytes (+76.4%) |
+| **Line Count (raw)** | 48 lines (minified) | 39,162 lines (formatted) | Unminified + extended |
 | **Line Count (normalized)** | 36,547 lines (formatted) | 39,968 lines (formatted) | +3,731 additions, -310 deletions |
-| **Modified Code Hunks** | Baseline | 52 distinct hunks | Core framework extensions |
+| **Modified Code Hunks** | Baseline | 54 distinct hunks | Core framework extensions |
 
 ---
 
 ## 2. High-Level Architectural Changes
 
-The modifications transform the Wallpaper Engine CEF frontend into a fully featured hybrid desktop application by integrating the background daemon (`wengine-helper.exe`). The modifications span six primary domains:
+The modifications transform the Wallpaper Engine CEF frontend into a fully featured hybrid desktop application by integrating the background daemon (`wengine-helper.exe`). The modifications span eight primary domains:
 
 ```mermaid
 flowchart TD
@@ -28,6 +28,7 @@ flowchart TD
         MetadataUI["Installed Metadata & Details Panel"]
         ExtractUI["Extraction & Download Manager"]
         AuthUI["Steam QR & Cookie Auth Controller"]
+        StartupUI["Service & Auth Status Banners"]
     end
 
     subgraph Backend ["WEngine Helper Daemon (wengine-helper.exe)"]
@@ -36,6 +37,7 @@ flowchart TD
         MetaStore["metadata.json Storage"]
         Extractor["Zip/Rar Wallpaper Unpacker"]
         Downloader["Multi-Threaded Downloader"]
+        AuthManager["AuthManager (Session & In-Flight Status)"]
     end
 
     HelperBridge <-->|HTTP / REST JSON| AxumRouter
@@ -44,10 +46,12 @@ flowchart TD
     MetadataUI --> HelperBridge
     ExtractUI --> HelperBridge
     AuthUI --> HelperBridge
+    StartupUI --> HelperBridge
     AxumRouter --> SteamClient
     AxumRouter --> MetaStore
     AxumRouter --> Extractor
     AxumRouter --> Downloader
+    AxumRouter --> AuthManager
 ```
 
 1. **Background Daemon IPC Bridge (`window.WengineHelper`)**: Full asynchronous communication with the local Axum HTTP server on port `43196` (heartbeats, lifecycle, downloads, extraction, authentication).
@@ -57,6 +61,7 @@ flowchart TD
 5. **Wallpaper Extraction & File Operations**: In-place single and batch extraction of `.pkg` / `.bin` scene wallpapers into editable project folders with live status toasts.
 6. **Multi-Selection Deletion**: Modal dialog with confirmation and automatic cleanup of database metadata upon deletion.
 7. **Steam Account & QR Code Authentication**: Integrated AngularJS modal controller and UI template for logging into Steam via mobile QR code or cookies.
+8. **Service Startup & Steam Authorization Status Feedback**: Automatic background service launch verification (`ensureRunning()`), live status notifications via top banner, real-time polling of Steam authentication state (`/api/auth/status` with `is_logging_in` tracking), and smooth auto-dismissal on completion.
 
 ---
 
@@ -120,6 +125,7 @@ Default hardcoded trend parameter:
 +   getDownloadsAll: function() { return fetch(this.url + "/api/workshop/download/all").then(...); },
 +   extractItem: function(workshopId, title, file) { return fetch(this.url + "/api/workshop/extract", ...); },
 +   browse: function(params) { return fetch(this.url + "/api/workshop/browse?" + query).then(...); },
++   getAuthStatus: function() { return fetch(this.url + "/api/auth/status").then(...); },
 +   ...
 + };
 ```
@@ -395,6 +401,7 @@ Full AngularJS controller managing the Steam account switcher and mobile QR logi
    - **Pagination Bar**: Added bottom pagination navigation (`<div class="browseWallpaperPagination">`) with `<<`, `>>`, and numbered page buttons.
    - **Workshop Metadata Section**: Added details box displaying Author link, File Size, Star Rating, Posted Date, Updated Date, and category tag pills.
    - **Extraction Progress Toast**: Added floating notification pill (`extractStatusNotice`) showing real-time unpacking progress and spinner.
+   - **Service Startup & Auth Status Alert**: Added dismissable top banner `<div class="browseAlert" ng-if="serviceStartupStatus && serviceStartupStatus.visible">` displaying daemon startup feedback, in-flight Steam authentication status, and user persona greeting upon successful login.
    - **Plugin Status Alert**: Added top banner for plugin downloading and initialization progress.
 
 2. **`views/modals/steamloginmodal.html`**:
@@ -402,6 +409,143 @@ Full AngularJS controller managing the Steam account switcher and mobile QR logi
 
 3. **`views/templates/workshopratingstars.html`**:
    - Overhauled rating stars layout with inline flex alignment and gold star styling.
+
+---
+
+### 3.10. Service Startup Status & Steam Authorization Feedback
+* **Location**: Lines ~2283–2361 in `browseWallpapersCtrl` and template `views/views/browsewallpapers.html`.
+* **Diff Type**: **Added**
+
+#### Removed:
+None.
+
+#### Added:
+1. Reactive `$scope.serviceStartupStatus` model with automatic health-checking and auth polling on UI boot (`W.initServiceStartupCheck`):
+```javascript
++ W.serviceStartupStatus = {
++   visible: true,
++   type: "info",
++   icon: "fa-spinner fa-spin",
++   text: "Launching the WEngine Helper service...",
++ };
++ W.initServiceStartupCheck = function () {
++   if (!window.WengineHelper) {
++     W.serviceStartupStatus.visible = false;
++     return;
++   }
++   window.WengineHelper.ensureRunning().then(function (alive) {
++     if (!alive) {
++       m(function () {
++         W.serviceStartupStatus.type = "warning";
++         W.serviceStartupStatus.icon = "fa-exclamation-triangle";
++         W.serviceStartupStatus.text = "The WEngine Helper service could not be started";
++         m(function () { W.serviceStartupStatus.visible = false; }, 4000);
++       });
++       return;
++     }
++     var checkAuthAttempts = 0;
++     var maxAttempts = 20;
++     function pollAuth() {
++       window.WengineHelper.getAuthStatus().then(function (auth) {
++         m(function () {
++           if (auth && auth.logged_in) {
++             var name = auth.persona_name ? (" (" + auth.persona_name + ")") : "";
++             W.serviceStartupStatus.type = "success";
++             W.serviceStartupStatus.icon = "fa-check-circle";
++             W.serviceStartupStatus.text = "The service has been launched. You have successfully logged into Steam." + name;
++             W.refreshPluginData();
++             m(function () { W.serviceStartupStatus.visible = false; }, 1500);
++           } else if (auth && auth.is_logging_in) {
++             W.serviceStartupStatus.type = "info";
++             W.serviceStartupStatus.icon = "fa-spinner fa-spin";
++             W.serviceStartupStatus.text = "The service has been launched. Log in to Steam...";
++             if (++checkAuthAttempts < maxAttempts) {
++               setTimeout(pollAuth, 500);
++             } else {
++               W.serviceStartupStatus.type = "success";
++               W.serviceStartupStatus.icon = "fa-check-circle";
++               W.serviceStartupStatus.text = "The WEngine Helper service has been started";
++               m(function () { W.serviceStartupStatus.visible = false; }, 1500);
++             }
++           } else {
++             if (checkAuthAttempts < 3) {
++               checkAuthAttempts++;
++               setTimeout(pollAuth, 500);
++             } else {
++               W.serviceStartupStatus.type = "success";
++               W.serviceStartupStatus.icon = "fa-check-circle";
++               W.serviceStartupStatus.text = "The WEngine Helper service has been started";
++               m(function () { W.serviceStartupStatus.visible = false; }, 1500);
++             }
++           }
++         });
++       }).catch(function () {
++         m(function () { W.serviceStartupStatus.visible = false; });
++       });
++     }
++     pollAuth();
++   });
++ };
++ W.initServiceStartupCheck();
+```
+2. Dismissable status banner placed directly at the top of the browse wallpaper view in `$templateCache`:
+```html
++ <div class="browseAlert" ng-if="serviceStartupStatus && serviceStartupStatus.visible">
++   <uib-alert type="{{serviceStartupStatus.type || 'info'}}" close="serviceStartupStatus.visible=false">
++     <div style="display:flex;align-items:center;justify-content:space-between;">
++       <div style="display:flex;align-items:center;">
++         <span class="fas" ng-class="serviceStartupStatus.icon || 'fa-spinner fa-spin'" style="margin-right:8px;"></span>
++         <span>{{serviceStartupStatus.text}}</span>
++       </div>
++     </div>
++   </uib-alert>
++ </div>
+```
+
+---
+
+### 3.11. Backend: In-Flight Steam Authorization Tracking (`src/auth/auth.rs`)
+* **Location**: `src/auth/auth.rs` lines ~27, 51, 68, 74, 340–357.
+* **Diff Type**: **Modified & Enhanced**
+
+#### Removed:
+None.
+
+#### Added:
+1. `is_logging_in: bool` field added to the serialized `AuthStatus` DTO:
+```rust
++ #[derive(Debug, Clone, Serialize)]
++ pub struct AuthStatus {
++     pub logged_in: bool,
++     pub is_logging_in: bool,
++     pub steamid: Option<String>,
++     pub persona_name: Option<String>,
++     pub avatar_url: Option<String>,
++ }
+```
+2. Thread-safe atomic flag in `AuthManager` tracking ongoing asynchronous credential logins:
+```rust
++ pub struct AuthManager {
++     session: Arc<RwLock<Option<AuthSession>>>,
++     storage_path: PathBuf,
++     is_logging_in: Arc<AtomicBool>,
++ }
++ 
++ impl AuthManager {
++     pub fn get_status(&self) -> AuthStatus {
++         let is_logging_in = self.is_logging_in.load(Ordering::SeqCst);
++         ...
++     }
++ 
++     pub async fn login_credentials(&self, username: &str, password: &str) -> anyhow::Result<AuthStatus> {
++         self.is_logging_in.store(true, Ordering::SeqCst);
++         let res = self.login_credentials_inner(username, password).await;
++         self.is_logging_in.store(false, Ordering::SeqCst);
++         res
++     }
++ }
+```
+3. Real-time handshake status exposed to the UI over `GET /api/auth/status`, enabling the frontend banner to differentiate between an idle state and an ongoing Steam RSA cryptographic handshake/login.
 
 ---
 

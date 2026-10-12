@@ -1,6 +1,6 @@
 [package]
 name = "wengine-helper"
-version = "0.1.0"
+version = "1.1.0"
 edition = "2021"
 
 [[bin]]
@@ -23,7 +23,7 @@ rand = "0.8"
 parking_lot = "0.12"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 sysinfo = "0.33"
-windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_UI_Shell"] }
 zip = "8.6.0"
 unrar = "0.5.8"
 aes-gcm = "0.10.3"

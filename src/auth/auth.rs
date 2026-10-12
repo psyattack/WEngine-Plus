@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -26,6 +27,7 @@ pub struct AuthSession {
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthStatus {
     pub logged_in: bool,
+    pub is_logging_in: bool,
     pub steamid: Option<String>,
     pub persona_name: Option<String>,
     pub avatar_url: Option<String>,
@@ -49,6 +51,7 @@ pub struct QrPollResult {
 pub struct AuthManager {
     session: Arc<RwLock<Option<AuthSession>>>,
     storage_path: PathBuf,
+    is_logging_in: Arc<AtomicBool>,
 }
 
 impl AuthManager {
@@ -65,14 +68,17 @@ impl AuthManager {
         Self {
             session: Arc::new(RwLock::new(initial_session)),
             storage_path,
+            is_logging_in: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn get_status(&self) -> AuthStatus {
+        let is_logging_in = self.is_logging_in.load(Ordering::SeqCst);
         let guard = self.session.read();
         if let Some(ref s) = *guard {
             AuthStatus {
                 logged_in: true,
+                is_logging_in,
                 steamid: Some(s.steamid.clone()),
                 persona_name: s.persona_name.clone(),
                 avatar_url: s.avatar_url.clone(),
@@ -80,6 +86,7 @@ impl AuthManager {
         } else {
             AuthStatus {
                 logged_in: false,
+                is_logging_in,
                 steamid: None,
                 persona_name: None,
                 avatar_url: None,
@@ -282,6 +289,7 @@ impl AuthManager {
                 status: "success".to_string(),
                 session: Some(AuthStatus {
                     logged_in: true,
+                    is_logging_in: false,
                     steamid: Some(steamid),
                     persona_name,
                     avatar_url,
@@ -328,6 +336,7 @@ impl AuthManager {
 
         Ok(AuthStatus {
             logged_in: true,
+            is_logging_in: false,
             steamid: Some(steamid),
             persona_name,
             avatar_url: None,
@@ -340,6 +349,13 @@ impl AuthManager {
     }
 
     pub async fn login_credentials(&self, username: &str, password: &str) -> anyhow::Result<AuthStatus> {
+        self.is_logging_in.store(true, Ordering::SeqCst);
+        let res = self.login_credentials_inner(username, password).await;
+        self.is_logging_in.store(false, Ordering::SeqCst);
+        res
+    }
+
+    async fn login_credentials_inner(&self, username: &str, password: &str) -> anyhow::Result<AuthStatus> {
         let client = reqwest::Client::new();
         let key_url = format!(
             "https://api.steampowered.com/IAuthenticationService/GetPasswordRSAPublicKey/v1/?account_name={}",
