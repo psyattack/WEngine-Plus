@@ -805,16 +805,9 @@ struct DeleteWallpaperReq {
     file: Option<String>,
 }
 
-fn clean_readonly_and_remove(p: &std::path::Path) {
+fn clean_readonly_and_remove_step(p: &std::path::Path) {
     if !p.exists() {
         return;
-    }
-    if p.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(p) {
-            for entry in entries.flatten() {
-                clean_readonly_and_remove(&entry.path());
-            }
-        }
     }
     if let Ok(meta) = std::fs::symlink_metadata(p) {
         let mut perms = meta.permissions();
@@ -824,22 +817,30 @@ fn clean_readonly_and_remove(p: &std::path::Path) {
         }
     }
     if p.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(p) {
+            for entry in entries.flatten() {
+                clean_readonly_and_remove_step(&entry.path());
+            }
+        }
         let _ = std::fs::remove_dir(p);
     } else {
         let _ = std::fs::remove_file(p);
     }
 }
 
-async fn robust_remove_dir(p: &std::path::Path) -> bool {
+async fn clean_readonly_and_remove(p: &std::path::Path) -> bool {
     if !p.exists() {
         return true;
     }
-    for _ in 0..6 {
-        clean_readonly_and_remove(p);
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(2000);
+
+    while start.elapsed() < timeout {
+        clean_readonly_and_remove_step(p);
         if !p.exists() {
             return true;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
     !p.exists()
 }
@@ -872,7 +873,7 @@ async fn handle_workshop_delete(
         let dir = if abs_p.is_file() { abs_p.parent() } else { Some(abs_p.as_path()) };
         if let Some(d) = dir {
             if d.exists() && (d.join("project.json").exists() || d.join("preview.jpg").exists() || d.join("preview.gif").exists() || !target_pid.is_empty()) {
-                if robust_remove_dir(d).await {
+                if clean_readonly_and_remove(d).await {
                     deleted = true;
                 }
             }
@@ -880,10 +881,16 @@ async fn handle_workshop_delete(
     }
 
     if !target_pid.is_empty() {
-        let myproj = state.we_dir.join("projects").join("myprojects").join(&target_pid);
-        if myproj.exists() {
-            if robust_remove_dir(&myproj).await {
-                deleted = true;
+        let candidates = [
+            state.we_dir.join("projects").join("myprojects").join(&target_pid),
+            state.we_dir.join("projects").join("defaultprojects").join(&target_pid),
+            state.we_dir.join("workshop").join("content").join("431960").join(&target_pid),
+        ];
+        for cand in &candidates {
+            if cand.exists() {
+                if clean_readonly_and_remove(cand).await {
+                    deleted = true;
+                }
             }
         }
         state.download.clear(&target_pid);

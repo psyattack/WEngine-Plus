@@ -59,7 +59,7 @@ flowchart TD
 3. **Steam Workshop Pagination & Query Interception**: Overridden `queryWorkshop` to support seamless 50 items/page pagination, page jump navigation, query caching, and SSR query parsing.
 4. **Enhanced Filtering & Tag Chip System**: Custom category, type, resolution, and content-rating dropdowns, 3-state tag chips (Off / Included / Excluded), and an `Incompatible Items` filter toggle.
 5. **Wallpaper Extraction & File Operations**: In-place single and batch extraction of `.pkg` / `.bin` scene wallpapers into editable project folders with live status toasts.
-6. **Multi-Selection Deletion**: Modal dialog with confirmation and automatic cleanup of database metadata upon deletion.
+6. **Wallpaper Deletion System**: Safe single and batch deletion of inactive wallpapers from UI grid and disk (`/api/workshop/delete`). Active wallpapers are protected from deletion; attempting to delete active wallpapers displays a notification prompt advising the user to apply another wallpaper first.
 7. **Steam Account & QR Code Authentication**: Integrated AngularJS modal controller and UI template for logging into Steam via mobile QR code or cookies.
 8. **Service Startup & Steam Authorization Status Feedback**: Automatic background service launch verification (`ensureRunning()`), live status notifications via top banner, real-time polling of Steam authentication state (`/api/auth/status` with `is_logging_in` tracking), and smooth auto-dismissal on completion.
 
@@ -549,6 +549,34 @@ None.
 
 ---
 
+### 3.12. Wallpaper Deletion & Active Wallpaper Protection System
+* **Location**: `scripts.js` (lines ~1500–2130, 3500–3550, 6680, 6857, 7738) & `src/main.rs` (`clean_readonly_and_remove`, `clean_readonly_and_remove_step`, `handle_workshop_delete`).
+* **Diff Type**: **Refactored / Added**
+
+#### Core Architecture & Mechanics:
+1. **Separation of Truly Applied vs. Previewed Wallpapers**:
+   - Wallpaper Engine locks wallpaper files in the desktop worker process (`wallpaper64.exe`) only when wallpapers are confirmed and applied to the desktop.
+   - When browsing/selecting wallpapers in the UI, Wallpaper Engine runs a temporary preview on monitor(s) via `browseWallpaperObject.selectWallpaper`.
+   - `W._trulyAppliedWallpapers` tracks the persisted configuration loaded at start (`applyMonitorConfigurationAndWallpaperConfig`) and updated upon user confirmation (`W.callbackOk`).
+2. **Truly Applied Check (`isWallpaperTrulyApplied`)**:
+   - Checks target items strictly against `W._trulyAppliedWallpapers` (and screensaver configurations).
+   - Temporary UI selections and previewed wallpapers do not trigger false positive active detections.
+3. **Preview Reversion & Two-Tier Handle Release**:
+   - If an unapplied wallpaper is deleted while currently active in UI preview/selection:
+     - The monitor preview is restored to the truly applied wallpaper (`_trulyAppliedWallpapers[location]`) or cleared (`clearWorkerWindow` / `removeWallpaper`).
+     - `W.currentSelection` is cleared/reset, releasing the temporary preview file lock in Wallpaper Engine CEF/engine before disk deletion.
+     - **Frontend IPC Yield**: If the target wallpaper was in preview (`wasInPreview` / `anyReverted`), frontend yields 250ms (`setTimeout(..., 250)`) before issuing `deleteWallpaper` over HTTP. This gives CEF IPC and Wallpaper Engine's worker process (`wallpaper64.exe` / mpv / CEF) adequate time to process window clearing and release underlying file handles (`CloseHandle`).
+4. **Backend Resilient Async Cleanup (`clean_readonly_and_remove`)**:
+   - Replaced aggressive process killing with an asynchronous retry loop in Rust (`tokio::time::sleep(100ms)` up to a 2000ms timeout).
+   - In each step (`clean_readonly_and_remove_step`), clears Windows read-only file/folder permissions and deletes unlocked files.
+   - Gracefully absorbs transient Windows file-locking race conditions (`ERROR_SHARING_VIOLATION`) from media decoders or background scanners without failing prematurely with `ERROR_DIR_NOT_EMPTY`.
+   - Cleans across `myprojects`, `defaultprojects`, and `workshop/content/431960`, and purges download/extract/metadata state caches.
+5. **Active Wallpaper Notification**:
+   - Single item deletion: if truly applied, deletion is blocked and an alert modal is presented: *"To delete active wallpaper, please apply another wallpaper first."* with an `OK` button.
+   - Multi-selection deletion: partitions items into inactive and active. Inactive items are deleted from disk and UI; active items remain in `W.multiSelection` and trigger the alert: *"To delete active wallpapers, please apply other wallpapers first."*.
+
+---
+
 ## 4. Summary of Removed / Deprecated Elements
 
 | Component / Code | Reason for Removal / Deprecation |
@@ -558,3 +586,4 @@ None.
 | **Local project fallback in `getMetaForWallpaper`** | Removed returning `w` when metadata was absent. Prevented display of misleading `["Everyone", "Local"]` tags on installed items. |
 | **Native `j.callDeferred("queryWorkshop")`** | Bypassed in favor of the local daemon API `/api/workshop/browse` to support 50 items/page, SSR pagination, and preloading. |
 | **Native Steam offline error modal (`pa`)** | Suppressed to allow WEngine Helper's offline caching and proxying to work smoothly without popup interruptions. |
+| **Active wallpaper deletion crutches (force killing processes & monitor force-resetting)** | Removed unstable engine-bypassing hacks. Inactive wallpapers are deleted directly and cleanly with preview handle yielding and async retry backoff; active wallpapers are protected from deletion and prompt the user to apply another wallpaper first. |

@@ -1506,173 +1506,312 @@
 
 
 
+        W._trulyAppliedWallpapers = W._trulyAppliedWallpapers || {};
+        W._trulyAppliedScreensavers = W._trulyAppliedScreensavers || {};
+
+        function extractWorkshopId(item, file) {
+          if (item) {
+            var wid = (W.getWallpaperWorkshopId ? W.getWallpaperWorkshopId(item) : (item.workshopid || item.pubfileid || item.id || ""));
+            if (wid) return String(wid);
+          }
+          var f = file || (item && (item.file || item.pkgfile)) || "";
+          if (f) {
+            var m = String(f).match(/(?:myprojects|workshop|content[\\/]431960)[\\/](\d+)/i);
+            if (m) return m[1];
+          }
+          return "";
+        }
+
+        function normalizePath(p) {
+          if (!p) return "";
+          var s = String(p).replace(/\\/g, "/").toLowerCase().trim();
+          s = s.replace(/\/(?:project\.json|scene\.pkg)$/i, "");
+          s = s.replace(/\/+$/, "");
+          return s;
+        }
+
         function wallpaperMatchesItem(w, targetItem, targetWid, targetF) {
           if (!w) return false;
           if (targetItem && w === targetItem) return true;
-          var wWid = (W.getWallpaperWorkshopId ? W.getWallpaperWorkshopId(w) : (w.workshopid || w.id || ""));
-          if (targetWid && String(wWid) === String(targetWid)) return true;
-          var wF = w.file || w.pkgfile || "";
-          if (targetF && wF && (wF === targetF || wF.indexOf(targetF) !== -1 || targetF.indexOf(wF) !== -1)) return true;
-          if (targetWid && wF && (wF.indexOf("/" + targetWid + "/") !== -1 || wF.indexOf("\\" + targetWid + "\\") !== -1 || wF.endsWith("/" + targetWid) || wF.endsWith("\\" + targetWid))) return true;
+          var tWid = targetWid || extractWorkshopId(targetItem, targetF);
+          var wWid = extractWorkshopId(w, w.file);
+          if (tWid && wWid && String(wWid) === String(tWid)) return true;
+          var wNorm = normalizePath(w.file || w.pkgfile);
+          var targetNorm = normalizePath(targetF || (targetItem && (targetItem.file || targetItem.pkgfile)));
+          if (wNorm && targetNorm) {
+            if (wNorm === targetNorm) return true;
+            if (wNorm.endsWith("/" + targetNorm) || targetNorm.endsWith("/" + wNorm)) return true;
+          }
           return false;
         }
 
-        function resetIfActiveOnMonitors(targetItem, targetWid, targetF) {
-          var activeWasReset = false;
+        function isWallpaperTrulyApplied(targetItem) {
+          if (!targetItem) return false;
+          var targetWid = extractWorkshopId(targetItem, targetItem.file);
+          var targetF = targetItem.file || targetItem.pkgfile || "";
+
+          var checkAppliedConfig = function (appliedMap) {
+            if (!appliedMap) return false;
+            for (var loc in appliedMap) {
+              if (Object.prototype.hasOwnProperty.call(appliedMap, loc)) {
+                var sel = appliedMap[loc];
+                if (!sel) continue;
+                if (wallpaperMatchesItem(sel, targetItem, targetWid, targetF)) {
+                  return true;
+                }
+                if (sel.playlist && angular.isArray(sel.playlist.items)) {
+                  for (var pi = 0; pi < sel.playlist.items.length; pi++) {
+                    var pItem = sel.playlist.items[pi];
+                    var pW = (pItem && pItem.wallpaper) ? pItem.wallpaper : pItem;
+                    if (pW && wallpaperMatchesItem(pW, targetItem, targetWid, targetF)) {
+                      return true;
+                    }
+                  }
+                }
+              }
+            }
+            return false;
+          };
+
+          if (W._trulyAppliedWallpapers && Object.keys(W._trulyAppliedWallpapers).length > 0) {
+            if (checkAppliedConfig(W._trulyAppliedWallpapers)) return true;
+          } else if (W.wallpaperConfig && W.wallpaperConfig.selectedwallpapers) {
+            if (checkAppliedConfig(W.wallpaperConfig.selectedwallpapers)) return true;
+          }
+
+          if (W._trulyAppliedScreensavers && Object.keys(W._trulyAppliedScreensavers).length > 0) {
+            if (checkAppliedConfig(W._trulyAppliedScreensavers)) return true;
+          } else if (W.wallpaperConfigScreensaver && W.wallpaperConfigScreensaver.selectedwallpapers) {
+            if (checkAppliedConfig(W.wallpaperConfigScreensaver.selectedwallpapers)) return true;
+          }
+
+          return false;
+        }
+
+        function isWallpaperActive(targetItem) {
+          return isWallpaperTrulyApplied(targetItem);
+        }
+
+        function revertPreviewIfActive(targetItem) {
+          if (!targetItem) return false;
+          var targetWid = extractWorkshopId(targetItem, targetItem.file);
+          var targetF = targetItem.file || targetItem.pkgfile || "";
+
+          var isMatch = function (obj) {
+            return wallpaperMatchesItem(obj, targetItem, targetWid, targetF);
+          };
+
+          var revertedAny = false;
           var allMons = (typeof ze === "function" ? ze() : (W.monitors || []));
           for (var i = 0; i < allMons.length; i++) {
             var mon = allMons[i];
             if (!mon) continue;
-            var isMatch = false;
-            if (mon.wallpaper && wallpaperMatchesItem(mon.wallpaper, targetItem, targetWid, targetF)) {
-              isMatch = true;
-            }
-            if (!isMatch && W.wallpaperConfig && W.wallpaperConfig.selectedwallpapers && mon.location) {
-              var sel = W.wallpaperConfig.selectedwallpapers[mon.location];
-              if (sel) {
-                if (wallpaperMatchesItem(sel, targetItem, targetWid, targetF)) {
-                  isMatch = true;
+            var monMatches = isMatch(mon.wallpaper);
+            var cfgMatches = W.wallpaperConfig && W.wallpaperConfig.selectedwallpapers && isMatch(W.wallpaperConfig.selectedwallpapers[mon.location]);
+
+            if (monMatches || cfgMatches) {
+              revertedAny = true;
+              var orig = W._trulyAppliedWallpapers && W._trulyAppliedWallpapers[mon.location];
+              if (orig && orig.file) {
+                var origItem = (typeof p === "function" ? p(orig.file) : null) ||
+                               (typeof He === "function" ? He(extractWorkshopId(null, orig.file)) : null);
+                mon.wallpaper = origItem || null;
+                if (W.wallpaperConfig && W.wallpaperConfig.selectedwallpapers) {
+                  W.wallpaperConfig.selectedwallpapers[mon.location] = angular.copy(orig);
+                }
+                if (j && j.callDeferred) {
+                  j.callDeferred("browseWallpaperObject", "selectWallpaper", orig.file, mon.location);
+                }
+              } else {
+                mon.wallpaper = void 0;
+                if (W.wallpaperConfig && W.wallpaperConfig.selectedwallpapers) {
+                  delete W.wallpaperConfig.selectedwallpapers[mon.location];
+                }
+                if (j && j.callDeferred) {
+                  j.callDeferred("browseWallpaperObject", "removeWallpaper", {
+                    location: mon.location,
+                    playlist: false
+                  });
+                  j.callDeferred("browseWallpaperObject", "clearWorkerWindow");
                 }
               }
             }
-            if (isMatch) {
-              activeWasReset = true;
-              mon.wallpaper = void 0;
-              if (W.wallpaperConfig && W.wallpaperConfig.selectedwallpapers && mon.location) {
-                delete W.wallpaperConfig.selectedwallpapers[mon.location];
-              }
-              if (typeof j !== "undefined" && j.callDeferred) {
-                j.callDeferred("browseWallpaperObject", "removeWallpaper", {
-                  location: mon.location,
-                  playlist: !1,
-                });
+          }
+
+          if (isMatch(W.currentSelection)) {
+            revertedAny = true;
+            if (W.selectedMonitor && W.selectedMonitor.wallpaper && !isMatch(W.selectedMonitor.wallpaper)) {
+              W.currentSelection = W.selectedMonitor.wallpaper;
+            } else {
+              W.currentSelection = void 0;
+            }
+            if (W.preview) {
+              W.preview.play = false;
+            }
+            if (j && j.callDeferred) {
+              j.callDeferred("browseWallpaperObject", "clearWorkerWindow");
+            }
+          }
+
+          if (typeof Ke === "function") {
+            Ke(targetItem, W.sourceIsInstalled);
+          }
+
+          return revertedAny;
+        }
+
+        function showActiveWallpaperNotice(isMultiple) {
+          var msg = isMultiple
+            ? "To delete active wallpapers, please apply other wallpapers first."
+            : "To delete active wallpaper, please apply another wallpaper first.";
+          var title = isMultiple ? "Active Wallpapers" : "Active Wallpaper";
+          if (F && F.open) {
+            F.open("genericConfirm", {
+              data: {
+                title: title,
+                message: msg,
+                okVisible: true,
+                cancelVisible: false,
+              },
+            });
+          } else {
+            alert(msg);
+          }
+        }
+
+        function removeWallpaperFromUIState(item, wid, f) {
+          if (wid && W.activeDownloads) {
+            delete W.activeDownloads[wid];
+          }
+          if (wid && W.activeExtracts) {
+            delete W.activeExtracts[wid];
+          }
+          if (wid && window.WengineHelper) {
+            if (window.WengineHelper.removeInstalledWorkshopId) {
+              window.WengineHelper.removeInstalledWorkshopId(wid);
+            }
+            if (window.WengineHelper._installedIds) {
+              delete window.WengineHelper._installedIds[String(wid)];
+            }
+          }
+          if (wid && W.installedMetadata) {
+            delete W.installedMetadata[String(wid)];
+          }
+          if (f && W.installedMetadata && W.installedMetadata[f]) {
+            delete W.installedMetadata[f];
+          }
+          if (wid && window.WengineHelper && window.WengineHelper.deleteMetadata) {
+            window.WengineHelper.deleteMetadata(wid);
+          }
+          if (f) {
+            Le(f);
+          }
+          if (W.wallpapers) {
+            for (var i = W.wallpapers.length - 1; i >= 0; i--) {
+              var curW = W.wallpapers[i];
+              if (curW && (
+                (wid && W.getWallpaperWorkshopId && W.getWallpaperWorkshopId(curW) === String(wid)) ||
+                (wid && String(curW.workshopid) === String(wid)) ||
+                (f && (curW.file === f || curW.pkgfile === f)) ||
+                curW === item
+              )) {
+                W.wallpapers.splice(i, 1);
               }
             }
           }
-          return activeWasReset;
+          if (wid && W.queryWallpapers) {
+            for (var q = 0; q < W.queryWallpapers.length; q++) {
+              var qw = W.queryWallpapers[q];
+              if (qw && (String(qw.workshopid) === String(wid) || qw.file === f)) {
+                qw.status = "downloadable";
+                qw.local = false;
+                qw.file = "workshop/" + wid;
+              }
+            }
+          }
+          if (wid && W.sortedWallpapers) {
+            for (var s = 0; s < W.sortedWallpapers.length; s++) {
+              var sw = W.sortedWallpapers[s];
+              if (sw && (String(sw.workshopid) === String(wid) || sw.file === f)) {
+                sw.status = "downloadable";
+                sw.local = false;
+                sw.file = "workshop/" + wid;
+              }
+            }
+          }
+          if (W.currentSelection && (
+            (wid && (String(W.currentSelection.workshopid) === String(wid) || (W.getWallpaperWorkshopId && W.getWallpaperWorkshopId(W.currentSelection) === String(wid)))) ||
+            (f && (W.currentSelection.file === f || W.currentSelection.pkgfile === f)) ||
+            W.currentSelection === item
+          )) {
+            if (W.sourceIsWorkshop) {
+              W.currentSelection.status = "downloadable";
+              W.currentSelection.local = false;
+              W.currentSelection.file = "workshop/" + wid;
+            } else {
+              W.currentSelection = void 0;
+            }
+          }
+          Ke(item, W.sourceIsInstalled);
         }
 
         W.deleteInstalledWallpaper = function (item) {
           if (!item) return;
+
+          if (isWallpaperActive(item)) {
+            showActiveWallpaperNotice(false);
+            return;
+          }
+
           var performDelete = function () {
-            var wid = (W.getWallpaperWorkshopId ? W.getWallpaperWorkshopId(item) : (item.workshopid || ""));
-            var f = item.file || "";
-            if (!wid && f) {
-              var mWid = f.match(/(?:myprojects|workshop)[\\/](\d+)/i);
-              if (mWid) wid = mWid[1];
-            }
-            var wasActive = resetIfActiveOnMonitors(item, wid, f);
-            if (W.currentSelection && wallpaperMatchesItem(W.currentSelection, item, wid, f)) {
-              if (W.sourceIsWorkshop) {
-                W.currentSelection.status = "downloadable";
-                W.currentSelection.local = false;
-                W.currentSelection.file = "workshop/" + wid;
-              } else {
-                W.currentSelection = void 0;
-              }
-            }
-            var executeDelete = function () {
-            if (window.WengineHelper) {
-              window.WengineHelper.deleteWallpaper({
-                pubfileid: String(wid),
-                file: String(f),
-              }).then(function () {
-                m(function () {
-                  if (wid && W.activeDownloads) {
-                    delete W.activeDownloads[wid];
-                  }
-                  if (wid && W.activeExtracts) {
-                    delete W.activeExtracts[wid];
-                  }
-                  if (wid && window.WengineHelper) {
-                    window.WengineHelper.removeInstalledWorkshopId(wid);
-                    if (window.WengineHelper._installedIds) delete window.WengineHelper._installedIds[String(wid)];
-                  }
-                  if (wid && W.installedMetadata) {
-                    delete W.installedMetadata[String(wid)];
-                  }
-                  if (f && W.installedMetadata && W.installedMetadata[f]) {
-                    delete W.installedMetadata[f];
-                  }
-                  if (W.installedMetadata) {
-                    
-                  }
-                  if (wid && window.WengineHelper && window.WengineHelper.deleteMetadata) {
-                    window.WengineHelper.deleteMetadata(wid);
-                  }
-                  if (f) {
-                    Le(f);
-                  }
-                  if (wid && W.wallpapers) {
-                    for (var i = W.wallpapers.length - 1; i >= 0; i--) {
-                      var curW = W.wallpapers[i];
-                      if (curW && ((W.getWallpaperWorkshopId && W.getWallpaperWorkshopId(curW) === String(wid)) || String(curW.workshopid) === String(wid) || curW.file === f)) {
-                        W.wallpapers.splice(i, 1);
-                      }
+            var wasInPreview = revertPreviewIfActive(item);
+            var wid = extractWorkshopId(item, item.file);
+            var f = item.file || item.pkgfile || "";
+
+            var executeSingle = function () {
+              if (window.WengineHelper) {
+                window.WengineHelper.deleteWallpaper({
+                  pubfileid: String(wid || ""),
+                  file: String(f || ""),
+                }).then(function () {
+                  m(function () {
+                    removeWallpaperFromUIState(item, wid, f);
+                    if (window.WengineHelper && window.WengineHelper.setInstalledWallpapers) {
+                      window.WengineHelper.setInstalledWallpapers(W.wallpapers);
                     }
-                  }
-                  if (window.WengineHelper && window.WengineHelper.setInstalledWallpapers) {
-                    window.WengineHelper.setInstalledWallpapers(W.wallpapers);
-                  }
-                  if (wid && W.queryWallpapers) {
-                    for (var q = 0; q < W.queryWallpapers.length; q++) {
-                      var qw = W.queryWallpapers[q];
-                      if (qw && (String(qw.workshopid) === String(wid) || qw.file === f)) {
-                        qw.status = "downloadable";
-                        qw.local = false;
-                        qw.file = "workshop/" + wid;
-                      }
+                    st();
+                    z();
+                    if (window.WengineHelper) {
+                      W.refreshDownloadsAndPlugins();
                     }
-                  }
-                  if (wid && W.sortedWallpapers) {
-                    for (var s = 0; s < W.sortedWallpapers.length; s++) {
-                      var sw = W.sortedWallpapers[s];
-                      if (sw && (String(sw.workshopid) === String(wid) || sw.file === f)) {
-                        sw.status = "downloadable";
-                        sw.local = false;
-                        sw.file = "workshop/" + wid;
-                      }
-                    }
-                  }
-                  if (W.currentSelection && (String(W.currentSelection.workshopid) === String(wid) || W.currentSelection.file === f)) {
                     if (W.sourceIsWorkshop) {
-                      W.currentSelection.status = "downloadable";
-                      W.currentSelection.local = false;
-                      W.currentSelection.file = "workshop/" + wid;
-                    } else {
-                      W.currentSelection = void 0;
+                      P();
                     }
-                  }
-                  st();
-                  Ke(item, W.sourceIsInstalled);
-                  z();
-                  if (window.WengineHelper) {
-                    W.refreshDownloadsAndPlugins();
-                  }
-                  if (W.sourceIsWorkshop) {
-                    P();
-                  }
+                  });
+                }).catch(function (err) {
+                  console.error("Delete failed:", err);
+                  m(function () {
+                    removeWallpaperFromUIState(item, wid, f);
+                    if (window.WengineHelper && window.WengineHelper.setInstalledWallpapers) {
+                      window.WengineHelper.setInstalledWallpapers(W.wallpapers);
+                    }
+                    st();
+                    z();
+                  });
                 });
-              }).catch(function (err) {
-                console.error("Delete failed:", err);
+              } else {
                 m(function () {
-                  if (f) Le(f);
-                  Ke(item, W.sourceIsInstalled);
+                  removeWallpaperFromUIState(item, wid, f);
+                  st();
                   z();
                 });
-              });
-            } else {
-              m(function () {
-                if (f) Le(f);
-                Ke(item, W.sourceIsInstalled);
-                z();
-              });
-            }
+              }
             };
-            if (wasActive) {
-              setTimeout(executeDelete, 250);
+
+            if (wasInPreview) {
+              setTimeout(executeSingle, 250);
             } else {
-              executeDelete();
+              executeSingle();
             }
           };
 
@@ -1905,108 +2044,61 @@
         };
         W.deleteMultipleWallpapers = function (items) {
           if (!items || !items.length || !window.WengineHelper) return;
+
+          var activeItems = [];
+          var inactiveItems = [];
+          for (var i = 0; i < items.length; i++) {
+            if (isWallpaperActive(items[i])) {
+              activeItems.push(items[i]);
+            } else {
+              inactiveItems.push(items[i]);
+            }
+          }
+
+          if (inactiveItems.length === 0) {
+            showActiveWallpaperNotice(true);
+            return;
+          }
+
           var performDeleteMulti = function () {
-            var anyActiveReset = false;
-            for (var i = 0; i < items.length; i++) {
-              var it = items[i];
-              var wid = (W.getWallpaperWorkshopId ? W.getWallpaperWorkshopId(it) : (it.workshopid || it.id || ""));
-              var f = it.file || it.pkgfile || "";
-              if (resetIfActiveOnMonitors(it, wid, f)) anyActiveReset = true;
-              if (W.currentSelection && wallpaperMatchesItem(W.currentSelection, it, wid, f)) {
-                if (W.sourceIsWorkshop) {
-                  W.currentSelection.status = "downloadable";
-                  W.currentSelection.local = false;
-                  W.currentSelection.file = "workshop/" + wid;
-                } else {
-                  W.currentSelection = void 0;
-                }
+            var anyReverted = false;
+            for (var i = 0; i < inactiveItems.length; i++) {
+              if (revertPreviewIfActive(inactiveItems[i])) {
+                anyReverted = true;
               }
             }
+
             var executeMulti = function () {
-            var promises = [];
-            for (var i = 0; i < items.length; i++) {
-              var it = items[i];
-              var wid = (W.getWallpaperWorkshopId ? W.getWallpaperWorkshopId(it) : (it.workshopid || it.id || ""));
-              promises.push(window.WengineHelper.deleteWallpaper({
-                pubfileid: String(wid),
-                file: it.file || it.pkgfile || ""
-              }));
-            }
-            Promise.all(promises).then(function () {
-              m(function () {
-                for (var i = 0; i < items.length; i++) {
-                  var it = items[i];
-                  var wid = (W.getWallpaperWorkshopId ? W.getWallpaperWorkshopId(it) : (it.workshopid || it.id || ""));
-                  var f = it.file || it.pkgfile || "";
-                  if (wid && W.activeDownloads) delete W.activeDownloads[wid];
-                  if (wid && W.activeExtracts) delete W.activeExtracts[wid];
-                  if (wid && window.WengineHelper) {
-                    window.WengineHelper.removeInstalledWorkshopId(wid);
-                    if (window.WengineHelper._installedIds) delete window.WengineHelper._installedIds[String(wid)];
-                  }
-                  if (wid && W.installedMetadata) {
-                    delete W.installedMetadata[String(wid)];
-                  }
-                  if (f && W.installedMetadata && W.installedMetadata[f]) {
-                    delete W.installedMetadata[f];
-                  }
-                  if (wid && window.WengineHelper && window.WengineHelper.deleteMetadata) {
-                    window.WengineHelper.deleteMetadata(wid);
-                  }
-                  if (W.currentSelection) {
-                    var curWid = (W.getWallpaperWorkshopId ? W.getWallpaperWorkshopId(W.currentSelection) : (W.currentSelection.workshopid || W.currentSelection.id || ""));
-                    var curF = W.currentSelection.file || W.currentSelection.pkgfile || "";
-                    if ((wid && (curWid === String(wid) || String(W.currentSelection.workshopid) === String(wid))) || (f && (curF === f || W.currentSelection.file === f))) {
-                      if (W.sourceIsWorkshop) {
-                        W.currentSelection.status = "downloadable";
-                        W.currentSelection.local = false;
-                        W.currentSelection.file = "workshop/" + wid;
-                      } else {
-                        W.currentSelection = void 0;
-                      }
-                    }
-                  }
-                  if (f) Le(f);
-                  Ke(it, W.sourceIsInstalled);
-                  if (W.wallpapers) {
-                    for (var w = W.wallpapers.length - 1; w >= 0; w--) {
-                      var curW = W.wallpapers[w];
-                      if (curW && ((wid && W.getWallpaperWorkshopId && W.getWallpaperWorkshopId(curW) === String(wid)) || (wid && String(curW.workshopid) === String(wid)) || (f && (curW.file === f || curW.pkgfile === f)))) {
-                        W.wallpapers.splice(w, 1);
-                      }
-                    }
-                  }
-                  if (wid && W.queryWallpapers) {
-                    for (var q = 0; q < W.queryWallpapers.length; q++) {
-                      var qw = W.queryWallpapers[q];
-                      if (qw && (String(qw.workshopid) === String(wid) || qw.file === f)) {
-                        qw.status = "downloadable";
-                        qw.local = false;
-                        qw.file = "workshop/" + wid;
-                      }
-                    }
-                  }
-                  if (wid && W.sortedWallpapers) {
-                    for (var s = 0; s < W.sortedWallpapers.length; s++) {
-                      var sw = W.sortedWallpapers[s];
-                      if (sw && (String(sw.workshopid) === String(wid) || sw.file === f)) {
-                        sw.status = "downloadable";
-                        sw.local = false;
-                        sw.file = "workshop/" + wid;
-                      }
-                    }
-                  }
-                }
-                if (window.WengineHelper && window.WengineHelper.setInstalledWallpapers) {
-                  window.WengineHelper.setInstalledWallpapers(W.wallpapers);
-                }
-                st();
-                if (W.selectedMonitor && W.selectedMonitor.playlist) {
-                  for (var i = 0; i < items.length; i++) {
-                    var it = items[i];
+              var promises = [];
+              for (var i = 0; i < inactiveItems.length; i++) {
+                var it = inactiveItems[i];
+                var wid = extractWorkshopId(it, it.file);
+                var f = it.file || it.pkgfile || "";
+                promises.push(window.WengineHelper.deleteWallpaper({
+                  pubfileid: String(wid || ""),
+                  file: String(f || "")
+                }));
+              }
+
+              Promise.all(promises).then(function () {
+                m(function () {
+                  for (var i = 0; i < inactiveItems.length; i++) {
+                    var it = inactiveItems[i];
+                    var wid = extractWorkshopId(it, it.file);
                     var f = it.file || it.pkgfile || "";
-                    if (f && W.selectedMonitor.playlistFlags) delete W.selectedMonitor.playlistFlags[f];
-                    if (W.selectedMonitor.playlist.items) {
+                    removeWallpaperFromUIState(it, wid, f);
+                  }
+
+                  if (window.WengineHelper && window.WengineHelper.setInstalledWallpapers) {
+                    window.WengineHelper.setInstalledWallpapers(W.wallpapers);
+                  }
+                  st();
+
+                  if (W.selectedMonitor && W.selectedMonitor.playlist && W.selectedMonitor.playlist.items) {
+                    for (var i = 0; i < inactiveItems.length; i++) {
+                      var it = inactiveItems[i];
+                      var f = it.file || it.pkgfile || "";
+                      if (f && W.selectedMonitor.playlistFlags) delete W.selectedMonitor.playlistFlags[f];
                       for (var pi = W.selectedMonitor.playlist.items.length - 1; pi >= 0; pi--) {
                         var pItem = W.selectedMonitor.playlist.items[pi];
                         var pW = pItem.wallpaper || pItem;
@@ -2016,30 +2108,32 @@
                       }
                     }
                   }
-                }
-                if (W.installedMetadata) {
-                  
-                }
-                W.multiSelection = [];
-                W.refreshDownloadsAndPlugins();
-                W.refreshPluginData();
-                if (W.sourceIsInstalled) {
-                  z();
-                }
-                if (W.sourceIsWorkshop) {
-                  P();
-                }
+
+                  W.multiSelection = activeItems.slice();
+                  W.refreshDownloadsAndPlugins();
+                  W.refreshPluginData();
+                  if (W.sourceIsInstalled) {
+                    z();
+                  }
+                  if (W.sourceIsWorkshop) {
+                    P();
+                  }
+
+                  if (activeItems.length > 0) {
+                    showActiveWallpaperNotice(true);
+                  }
+                });
               });
-            });
             };
-            if (anyActiveReset) {
+
+            if (anyReverted) {
               setTimeout(executeMulti, 250);
             } else {
               executeMulti();
             }
           };
 
-          var count = items.length;
+          var count = inactiveItems.length;
           var title = count > 1 ? "Delete Wallpapers" : "Delete Wallpaper";
           var msg = count > 1
             ? ("Are you sure you want to delete " + count + " selected wallpapers from your system?")
@@ -3433,7 +3527,17 @@
                 if (wid && window.WengineHelper) {
                   if (window.WengineHelper.removeInstalledWorkshopId) window.WengineHelper.removeInstalledWorkshopId(wid);
                   if (window.WengineHelper._installedIds) delete window.WengineHelper._installedIds[wid];
-                  window.WengineHelper.deleteWallpaper({ pubfileid: wid, file: it.file || "" });
+                  if (!isWallpaperTrulyApplied(it)) {
+                    var wasInPreview = revertPreviewIfActive(it);
+                    var doDel = function () {
+                      window.WengineHelper.deleteWallpaper({ pubfileid: wid, file: it.file || "" });
+                    };
+                    if (wasInPreview) {
+                      setTimeout(doDel, 250);
+                    } else {
+                      doDel();
+                    }
+                  }
                 }
                 if (wid && W.activeDownloads) delete W.activeDownloads[wid];
                 if (wid && W.activeExtracts) delete W.activeExtracts[wid];
@@ -6612,6 +6716,8 @@
                 (W.wallpaperConfig = e),
                 (W.wallpaperConfigRoot = e),
                 (W.wallpaperConfigScreensaver = t),
+                (W._trulyAppliedWallpapers = angular.copy(e.selectedwallpapers)),
+                (W._trulyAppliedScreensavers = angular.copy(t.selectedwallpapers)),
                 !(W.wallpaperConfigGroup = "wallpaper")),
               t =
                 ((W.startWatchingScreensaverSettings = function () {
@@ -6783,6 +6889,8 @@
                 W.generalUserSettings.usermonitors || {}),
               (W.browserRuntime = i),
               V.validateSharedSettings(W.sharedSettings),
+              (W._trulyAppliedWallpapers = angular.copy((W.wallpaperConfig && W.wallpaperConfig.selectedwallpapers) || {})),
+              (W._trulyAppliedScreensavers = angular.copy((W.wallpaperConfigScreensaver && W.wallpaperConfigScreensaver.selectedwallpapers) || {})),
               m(function () {
                 ((v = !0), W.requestTrialWarning && W.showTrialWarning(), Ft());
               }),
@@ -7661,6 +7769,12 @@
           (W.callbackOk = function (e) {
             if (W.currentSelection && (W.currentSelection.status === "installed" || W.currentSelection.local)) {
               l(W.currentSelection);
+            }
+            if (W.wallpaperConfig && W.wallpaperConfig.selectedwallpapers) {
+              W._trulyAppliedWallpapers = angular.copy(W.wallpaperConfig.selectedwallpapers);
+            }
+            if (W.wallpaperConfigScreensaver && W.wallpaperConfigScreensaver.selectedwallpapers) {
+              W._trulyAppliedScreensavers = angular.copy(W.wallpaperConfigScreensaver.selectedwallpapers);
             }
             e
               ? "downloadable" === (W.currentSelection && W.currentSelection.status)
