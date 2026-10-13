@@ -81,9 +81,9 @@ flowchart LR
 </details>
 
 <details>
-<summary><b>Built-in Patcher & Safety Backup</b></summary>
+<summary><b>Setup & Safety Backup</b></summary>
 
-- **One-Click Patcher**: Running `wengine-helper.exe` automatically locates `scripts.js`, creates a backup (`scripts.js.bak`), and installs the patched script.
+- **One-Click Setup**: Running `wengine-helper.exe` automatically locates `scripts.js`, creates a backup (`scripts.js.bak`), and installs.
 - **Silent Background Execution**: Wallpaper Engine automatically runs the helper daemon with `--daemon` on startup without user intervention.
 
 </details>
@@ -117,14 +117,14 @@ For a complete, line-by-line technical audit of all changes between the original
 3. Launch **Wallpaper Engine** normally.
 
 > [!NOTE]
-> Wallpaper Engine automatically launches `wengine-helper.exe` in the background with the `--daemon` flag upon startup. You do not need to start it manually.
+> Wallpaper Engine GUI automatically launches `wengine-helper.exe` in the background with the `--daemon` flag upon startup. You do not need to start it manually. It also closes automatically along with the GUI.
 
 #### Command-Line Flags
 
 | Flag | Action |
 | :--- | :--- |
-| `wengine-helper.exe` | **Interactive Patcher (Default)**: Inspects target, creates backup, applies patch, prompts for keypress. |
-| `wengine-helper.exe -y` | **Silent Patcher**: Automatically applies patch and exits without confirmation prompt. |
+| `wengine-helper.exe` | **Setup (Default)**: Inspects target, install, creates backup, applies patch, prompts for keypress. |
+| `wengine-helper.exe -y` | **Silent Setup**: Automatically setup and exits without confirmation prompt. |
 | `wengine-helper.exe --daemon` | **Daemon Mode**: Starts background Axum REST server on port `43196`. |
 
 ---
@@ -163,18 +163,18 @@ The compiled release binary is output to `target/release/wengine-helper.exe`.
 <td width="50%">
 
 ### Frontend
-- **AngularJS 1.x** (Wallpaper Engine CEF core)
-- **FontAwesome 5** (Status icons & badges)
+- **AngularJS** (Wallpaper Engine CEF core)
+- **FontAwesome** (Status icons & badges)
 - **SVG QR Code Renderer**
 
 </td>
 <td width="50%">
 
 ### Backend
-- **Axum 0.8** (Asynchronous HTTP REST API)
-- **Tokio 1.x** (Async runtime & multi-threading)
+- **Axum** (Asynchronous HTTP REST API)
+- **Tokio** (Async runtime & multi-threading)
 - **Tower-HTTP** (CORS layer)
-- **Reqwest 0.12 + Scraper 0.22** (Steam SSR parser)
+- **Reqwest + Scraper** (Steam SSR parser)
 - **zip + unrar** (Native archive extraction)
 - **AES-GCM + SHA-256 + RSA** (Session security)
 - **sysinfo + windows-sys** (Win32 process management)
@@ -234,24 +234,17 @@ WEngine-Plus/
 ## 📝 Configuration & Data Storage
 
 All operational files are saved directly in the scripts directory:  
-**`C:\Program Files\Wallpaper Engine\ui\dist\scripts\`**
+**`~wallpaper_engine_folder\ui\dist\scripts\`**
 
 | File | Description |
 | :--- | :--- |
 | `scripts.js` | Enhanced Wallpaper Engine frontend script |
 | `scripts.js.bak` | Untouched backup of the original script |
 | `metadata.json` | Local metadata database of installed wallpapers |
-| `wengine-helper.exe` | Background daemon & script patcher binary |
-| `steam_session.json` | Saved Steam Account Session |
-| `download_accounts.json` | Saved accounts for download |
+| `steam_session.json` | Saved Web Steam Account Session |
+| `download_accounts.json` | Saved accounts for download (If there is, no passwords) |
 | `plugins/` | Auto-downloaded plugins (DepotDownloaderMod, RePKG) |
 | `dotnet/` | Portable .NET Runtime 9.0.17 (if needed) |
-
----
-
-## 🤝 Contributing
-
-Contributions, bug reports, and suggestions are welcome! Feel free to open an Issue or submit a Pull Request.
 
 ---
 
@@ -274,7 +267,7 @@ This application is **not affiliated with or endorsed by** Valve Corporation or 
 
 ---
 
-## 💬 Support
+## 💬 Support & Contributing
 
 For issues, questions, or feature requests, please open an issue on [**GitHub**](https://github.com/psyattack/WEngine-Plus/issues).
 

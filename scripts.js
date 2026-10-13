@@ -1263,20 +1263,27 @@
           "Retro", "Sci-Fi", "Sports", "Technology", "Television",
           "Vehicle", "Unspecified"
         ];
-        W.filterHelper = {
-          category: "",
-          type_tag: "",
-          resolution: "",
-          age_rating: "",
-          asset_type: "",
-          asset_genre: "",
-          script_type: "",
-          incompatible: false,
-          misc_tags: [],
-          excluded_misc_tags: [],
-          genre_tags: [],
-          excluded_genre_tags: []
+        function createFilterHelper() {
+          return {
+            category: "",
+            type_tag: "",
+            resolution: "",
+            age_rating: "",
+            asset_type: "",
+            asset_genre: "",
+            script_type: "",
+            incompatible: false,
+            misc_tags: [],
+            excluded_misc_tags: [],
+            genre_tags: [],
+            excluded_genre_tags: []
+          };
+        }
+        W.filterHelperBySource = {
+          installed: createFilterHelper(),
+          workshop: createFilterHelper()
         };
+        W.filterHelper = W.filterHelperBySource.installed;
         W.filterHideAssets = true;
         W.incompatibleFilterTitle = "Incompatible Items";
         W.incompatibleFilterTooltip = "Some items are not possible to include in the game. You can still find them if you select this box.";
@@ -1291,8 +1298,8 @@
             z();
           }
         };
-        W.$watch("filterHelper.incompatible", function (newVal, oldVal) {
-          if (newVal !== oldVal) {
+        W.$watchGroup(["source", "filterHelper.incompatible"], function (newVal, oldVal) {
+          if (newVal[0] === oldVal[0] && newVal[1] !== oldVal[1]) {
             W.onFilterChange();
           }
         });
@@ -2026,7 +2033,7 @@
           if (W.sourceIsInstalled && W.filterAuthor && W.filterAuthor.installedAuthor) {
             return W.filterAuthor.installedAuthor;
           }
-          if (W.filterAuthor && W.filterAuthor.authorSteamId) {
+          if (W.sourceIsWorkshop && W.filterAuthor && W.filterAuthor.authorSteamId) {
             var u = W.steamUserInfos && W.steamUserInfos[W.filterAuthor.authorSteamId];
             return (u && u.name) || W.filterAuthor.authorSteamId;
           }
@@ -8044,31 +8051,16 @@
                 V.showSteamError();
             }),
             (W.callbackResetFilter = function () {
-              var t, e;
-              if (W.filterHelper) {
-                W.filterHelper = {
-                  category: "",
-                  type_tag: "",
-                  resolution: "",
-                  age_rating: "",
-                  asset_type: "",
-                  asset_genre: "",
-                  script_type: "",
-                  incompatible: false,
-                  misc_tags: [],
-                  excluded_misc_tags: [],
-                  genre_tags: [],
-                  excluded_genre_tags: []
-                };
-              }
-              if (W.filter) {
-                W.filter.text = "";
-              }
-              if (W.filterAuthor) {
-                delete W.filterAuthor.authorSteamId;
-              }
-              if (W.filterPreset) {
-                delete W.filterPreset.workshopid;
+              var t, e, sourceKey = W.sourceIsWorkshop ? "workshop" : "installed";
+              if (!W.sourceIsWorkshop && !W.sourceIsInstalled) return;
+              W.filterHelperBySource[sourceKey] = createFilterHelper();
+              W.filterHelper = W.filterHelperBySource[sourceKey];
+              if (W.filter) W.filter.text = "";
+              if (W.sourceIsWorkshop) {
+                if (W.filterAuthor) delete W.filterAuthor.authorSteamId;
+                if (W.filterPreset) delete W.filterPreset.workshopid;
+              } else if (W.sourceIsInstalled && W.filterAuthor) {
+                delete W.filterAuthor.installedAuthor;
               }
               W.sourceIsExplore ||
                 (angular.merge(W.filterTemp, we()),
@@ -9342,11 +9334,11 @@
               P());
           }),
           (W.callbackClearAuthorFilter = function () {
-            delete W.filterAuthor.authorSteamId;
-            delete W.filterAuthor.installedAuthor;
             if (W.sourceIsInstalled) {
+              delete W.filterAuthor.installedAuthor;
               z();
             } else {
+              delete W.filterAuthor.authorSteamId;
               P();
             }
           }),
@@ -9443,12 +9435,11 @@
                 (W.sourceIsExplore = "explore" === e),
                 (W.sourceIsInstalled =
                   !W.sourceIsWorkshop && !W.sourceIsExplore && !W.sourceIsPluginSettings),
-                (!W.sourceIsInstalled && W.filterAuthor && delete W.filterAuthor.installedAuthor),
-                (!W.sourceIsWorkshop && W.filterAuthor && delete W.filterAuthor.authorSteamId),
                 jt(),
                 W.sourceIsWorkshop
                   ? ((W.pagination = ge),
                     (W.filter = b),
+                    (W.filterHelper = W.filterHelperBySource.workshop),
                     (W.filterTemp = le),
                     (W.sortOptions = pe),
                     (W.filter.typetags.Application = !1))
@@ -9460,6 +9451,7 @@
                     : W.sourceIsInstalled &&
                       ((W.pagination = u),
                       (W.filter = h),
+                      (W.filterHelper = W.filterHelperBySource.installed),
                       (W.filterTemp = ce),
                       (W.sortOptions = de)),
                 (W.filterProxy.ratingtags = angular.copy(W.filter.ratingtags)),

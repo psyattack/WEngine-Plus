@@ -57,7 +57,7 @@ flowchart TD
 1. **Background Daemon IPC Bridge (`window.WengineHelper`)**: Full asynchronous communication with the local Axum HTTP server on port `43196` (heartbeats, lifecycle, downloads, extraction, authentication).
 2. **Metadata Persistence & Steam 429 Prevention**: Real-time reading of wallpaper metadata directly from disk (`scripts/metadata.json`). Eliminated repetitive Steam community scraping when browsing installed wallpapers to avoid HTTP 429 rate limits.
 3. **Steam Workshop Pagination & Query Interception**: Overridden `queryWorkshop` to support seamless 50 items/page pagination, page jump navigation, query caching, and SSR query parsing.
-4. **Enhanced Filtering & Tag Chip System**: Custom category, type, resolution, and content-rating dropdowns, 3-state tag chips (Off / Included / Excluded), and an `Incompatible Items` filter toggle.
+4. **Enhanced Filtering & Tag Chip System**: Custom category, type, resolution, and content-rating dropdowns, 3-state tag chips (Off / Included / Excluded), and an `Incompatible Items` filter toggle. Installed and Workshop maintain independent helper-filter state and source-specific author filters.
 5. **Wallpaper Extraction & File Operations**: In-place single and batch extraction of `.pkg` / `.bin` scene wallpapers into editable project folders with live status toasts.
 6. **Wallpaper Deletion System**: Safe single and batch deletion of inactive wallpapers from UI grid and disk (`/api/workshop/delete`). Active wallpapers are protected from deletion; attempting to delete active wallpapers displays a notification prompt advising the user to apply another wallpaper first.
 7. **Steam Account & QR Code Authentication**: Integrated AngularJS modal controller and UI template for logging into Steam via mobile QR code or cookies.
@@ -302,33 +302,55 @@ Broken native sort comparators that caused crashes or incorrect ordering when `f
 
 ---
 
-### 3.6. Filter Reset & Author Filtering
-* **Location**: Lines ~8630–8670 and ~9930–9960.
+### 3.6. Independent Source Filters, Reset & Author Filtering
+* **Location**: `scripts.js`, `createFilterHelper`, the incompatible-items watcher, author-label resolution, `callbackResetFilter`, `callbackClearAuthorFilter`, and the source-switch handler.
 * **Diff Type**: **Added & Enhanced**
 
-#### Added:
-1. Resetting `filterHelper` dropdowns and tag chips on `callbackResetFilter()`:
+#### Current Behavior:
+1. **Independent helper state for Installed and Workshop**: `createFilterHelper()` creates defaults for category, type, resolution, age rating, asset type/genre, script type, the incompatible flag, and included/excluded miscellaneous and genre tags. Each call creates fresh arrays, avoiding shared tag state:
 ```javascript
-+ if (W.filterHelper) {
-+   W.filterHelper = {
-+     category: "", type_tag: "", resolution: "", age_rating: "",
-+     asset_type: "", asset_genre: "", script_type: "", incompatible: false,
-+     genre_tags: [], misc_tags: [], excluded_genre_tags: [], excluded_misc_tags: []
-+   };
-+ }
+W.filterHelperBySource = {
+  installed: createFilterHelper(),
+  workshop: createFilterHelper()
+};
+W.filterHelper = W.filterHelperBySource.installed;
 ```
-2. Author filtering in the **Installed** view:
+The source-switch handler selects the corresponding object as `W.filterHelper`. Switching between Installed and Workshop preserves each view's helper-filter selections rather than reusing one shared object. This is in-memory state, not persistence across application restarts.
+
+2. **Source-aware reset**: `callbackResetFilter()` returns immediately outside Installed and Workshop. In a supported view, it replaces only that source's helper object with fresh defaults, clears the active search text, and clears only the relevant author/preset fields:
 ```javascript
-+ if (W.sourceIsInstalled) {
-+   W.filterAuthor.installedAuthor = author;
-+   z(); // Re-filter local list immediately
-+ }
+var t, e, sourceKey = W.sourceIsWorkshop ? "workshop" : "installed";
+if (!W.sourceIsWorkshop && !W.sourceIsInstalled) return;
+W.filterHelperBySource[sourceKey] = createFilterHelper();
+W.filterHelper = W.filterHelperBySource[sourceKey];
+if (W.filter) W.filter.text = "";
+if (W.sourceIsWorkshop) {
+  if (W.filterAuthor) delete W.filterAuthor.authorSteamId;
+  if (W.filterPreset) delete W.filterPreset.workshopid;
+} else if (W.sourceIsInstalled && W.filterAuthor) {
+  delete W.filterAuthor.installedAuthor;
+}
 ```
-3. Clearing author filters:
+The existing native filter-reset and refresh logic follows this source-specific cleanup.
+
+3. **Author-filter isolation**: Installed author filtering stores `W.filterAuthor.installedAuthor` and refreshes the local list with `z()`. Switching sources no longer deletes either author field. Workshop author names/Steam IDs are displayed only while `W.sourceIsWorkshop` is true. Clearing an author filter removes only the active source's field:
 ```javascript
-+ delete W.filterAuthor.authorSteamId;
-+ delete W.filterAuthor.installedAuthor;
-+ if (W.sourceIsInstalled) z();
+if (W.sourceIsInstalled) {
+  delete W.filterAuthor.installedAuthor;
+  z();
+} else {
+  delete W.filterAuthor.authorSteamId;
+  P();
+}
+```
+
+4. **Source-aware incompatible-items watcher**: The watcher observes both the source and incompatible flag. It invokes `onFilterChange()` only when the flag changes while the source remains unchanged, avoiding a redundant filter-change callback when switching sources with different saved flag values:
+```javascript
+W.$watchGroup(["source", "filterHelper.incompatible"], function (newVal, oldVal) {
+  if (newVal[0] === oldVal[0] && newVal[1] !== oldVal[1]) {
+    W.onFilterChange();
+  }
+});
 ```
 
 ---
@@ -577,10 +599,12 @@ None.
 
 ---
 
+
 ## 4. Summary of Removed / Deprecated Elements
 
 | Component / Code | Reason for Removal / Deprecation |
 | :--- | :--- |
+| **Shared helper-filter state and cross-source author cleanup** | Replaced a single helper object with per-source state; source switches no longer delete author filters, and reset/clear operations target the active source. |
 | **`localStorage` metadata cache** | Removed to eliminate desynchronization and resurrecting deleted wallpapers. All metadata is strictly read from `scripts/metadata.json`. |
 | **Premature `saveMetadata` calls** | Removed calls in `callbackWallpaperSelected`, `startWorkshopDownload`, and `subscribeWorkshopItem` so unfinished downloads are not recorded in metadata. |
 | **Local project fallback in `getMetaForWallpaper`** | Removed returning `w` when metadata was absent. Prevented display of misleading `["Everyone", "Local"]` tags on installed items. |
