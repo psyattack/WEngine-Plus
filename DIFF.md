@@ -599,6 +599,45 @@ None.
 
 ---
 
+### 3.13. GitHub Auto-Update, Version Display & Silent Self-Patcher System
+* **Location**: `src/services/update.rs`, `src/setup.rs` (`run_silent_patch_mode`), `src/main.rs`, and `scripts.js` (`BrowseWallpapersCtrl`, `window.WengineHelper`, `views/views/browsewallpapers.html`).
+* **Diff Type**: **Added & Integrated**
+
+#### Architecture & Mechanics:
+1. **Startup GitHub Release Check**:
+   - On daemon launch, `UpdateManager` automatically checks `https://api.github.com/repos/psyattack/WEngine-Plus/releases/latest` asynchronously via `reqwest` with user agent `WEngine-Plus/<version>`.
+   - Compares semver (`major.minor.patch`) to detect newer releases.
+   - Extracts release notes and the `wengine-helper.exe` binary asset download URL.
+   - Results are cached in memory (5-minute TTL) with an optional `?force=true` query param for manual re-checks.
+2. **UI Version Display & Update State**:
+   - Current program version (`WEngine+ v1.2.0`) is seamlessly integrated into the footer (`browseWallpaperFooterControls .center`), positioned symmetrically between the left Editor buttons and right OK/Cancel buttons.
+   - Blends with the UI skin (`opacity: 0.65`, system font), clicking it triggers an instant update check (or Shift+Click for instant local mock test).
+   - When an update is detected, displays a clean badge: `New version <ver> available` and an `Update` button (`btn-xs btn-success`), styled with identical matching heights (`22px`), box-sizing, and font sizes.
+   - During download, dynamically renders live progress (`Downloading... X%`) with an animated spinner, matching the action button dimensions.
+   - Handles network failures gracefully with error tooltips and a `Retry` action.
+3. **Chunked Streaming Download & Validation**:
+   - Downloads binary chunk-by-chunk to `<scripts>/wengine-helper.exe.update` while reporting percentage progress to the frontend over `/api/update/status`.
+   - Validates that the downloaded binary is not empty/corrupted (size > 1 MB and begins with the PE executable signature `MZ`).
+4. **Three-Phase Self-Replacement, Silent Patching & Reopening**:
+   - **Phase 1: GUI Closure**: When the user initiates update application (`POST /api/update/apply`), `LifecycleManager` sets `IS_UPDATING = true` to protect the process from premature watcher termination. The frontend receives confirmation and calls `window.ui.close()`, gracefully closing CEF.
+   - **Phase 2: Silent Script Patching & Binary Replacement**:
+     - Running binary renames itself to `wengine-helper.exe.old` and moves `wengine-helper.exe.update` to `wengine-helper.exe`.
+     - Spawns the new binary with `--silent-patch-script --old-pid <pid> --old-exe <path>`.
+     - The new binary waits for the old daemon PID to exit, waits for `wallpaperui.exe` to close completely, and reliably deletes `.old` with a 30-attempt retry loop and detached PowerShell fallback.
+     - Overwrites `scripts.js` with its new embedded `SCRIPTS_CONTENT` (after creating safety backup `scripts.js.bak`).
+     - Launches `wengine-helper.exe --daemon` in the background with `CREATE_NO_WINDOW`.
+   - **Phase 3: GUI Auto-Reopen**:
+     - The new binary locates `wallpaper64.exe` (or `wallpaper32.exe`) via comprehensive registry, process, and disk auto-discovery (`find_wallpaper_engine_dir`).
+     - Executes `wallpaper64.exe` as a normal GUI application (without `CREATE_NO_WINDOW`, which previously suppressed CEF window creation), with a PowerShell `Start-Process` fallback.
+     - Wallpaper Engine signals the running instance to immediately display the freshly updated CEF GUI browser.
+     - The updated GUI loads the new `scripts.js` with zero manual user intervention.
+5. **Pre-Initialization Reliability & Zero-Config Mock Testing**:
+   - `checkUpdate()` and `initUpdateCheck()` await `ensureRunning()` before dispatching HTTP requests to avoid early `ERR_CONNECTION_REFUSED` errors.
+   - Polling fallback handles asynchronous background update checks without requiring manual clicks.
+   - Built-in zero-config mock endpoints (`/api/update/mock/release` & `/api/update/mock/binary`) enable instant testing of the complete update pipeline without pushing releases to GitHub. Shift+Click on the version string in the UI triggers a mock update instantly.
+
+---
+
 
 ## 4. Summary of Removed / Deprecated Elements
 

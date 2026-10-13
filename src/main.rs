@@ -28,6 +28,7 @@ use services::extract::ExtractManager;
 use services::lifecycle::LifecycleManager;
 use services::metadata::MetadataManager;
 use services::plugins::PluginManager;
+use services::update::{UpdateInfo, UpdateManager};
 use steam::client::SteamClient;
 use steam::parser;
 use steam::types::{self, BrowseQuery};
@@ -51,6 +52,7 @@ struct AppState {
     dotnet: Arc<DotnetManager>,
     qr_download: Arc<accounts::QrDownloadAuthManager>,
     metadata: Arc<MetadataManager>,
+    update: Arc<UpdateManager>,
     browse_cache: Arc<RwLock<HashMap<String, CachedBrowsePage>>>,
     workshop_cache: Arc<RwLock<HashMap<String, types::WorkshopItem>>>,
     we_dir: PathBuf,
@@ -79,33 +81,7 @@ async fn main() -> anyhow::Result<()> {
         })
     }).unwrap_or(false);
 
-    let is_daemon = has_daemon_flag || is_parent_we;
-
-    if !is_daemon {
-        let auto_confirm = args.iter().any(|a| a == "-y" || a == "--yes");
-        setup::run_setup_mode(auto_confirm);
-        return Ok(());
-    }
-
-    let running_we_dir = sys.processes().values().find_map(|p| {
-        let name = p.name().to_string_lossy().to_lowercase();
-        if name == "wallpaper64.exe" || name == "wallpaper32.exe" {
-            p.exe().and_then(|e| e.parent().map(|d| d.to_path_buf()))
-        } else {
-            None
-        }
-    });
-
-    let we_dir = running_we_dir
-        .or_else(|| {
-            exe_dir
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(|p| p.to_path_buf())
-                .filter(|p| p.exists())
-        })
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Wallpaper Engine"));
+    let we_dir = setup::find_wallpaper_engine_dir();
 
     // Plugins MUST be located in the same directory as scripts (ui/dist/scripts/plugins)
     let scripts_dir = if exe_dir.join("scripts.js").exists() {
@@ -119,6 +95,28 @@ async fn main() -> anyhow::Result<()> {
     } else {
         exe_dir.clone()
     };
+
+    let has_silent_patch = args.iter().any(|a| a == "--silent-patch-script" || a == "--silent-patch");
+    if has_silent_patch {
+        let old_pid = args.windows(2).find(|w| w[0] == "--old-pid").and_then(|w| w[1].parse().ok());
+        let old_exe = args.windows(2).find(|w| w[0] == "--old-exe").map(|w| PathBuf::from(&w[1]));
+        setup::run_silent_patch_mode(&we_dir, &scripts_dir, old_pid, old_exe);
+        return Ok(());
+    }
+
+    // Clean up any lingering .old binary from previous update on startup
+    let old_exe = scripts_dir.join("wengine-helper.exe.old");
+    if old_exe.exists() {
+        let _ = std::fs::remove_file(&old_exe);
+    }
+
+    let is_daemon = has_daemon_flag || is_parent_we;
+
+    if !is_daemon {
+        let auto_confirm = args.iter().any(|a| a == "-y" || a == "--yes");
+        setup::run_setup_mode(auto_confirm);
+        return Ok(());
+    }
 
     let plugins_dir = scripts_dir.join("plugins");
     let _ = std::fs::create_dir_all(&plugins_dir);
@@ -134,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
     let qr_download = Arc::new(accounts::QrDownloadAuthManager::new());
     let metadata = Arc::new(MetadataManager::new(&scripts_dir));
     metadata.clean_uninstalled(&we_dir);
+    let update = Arc::new(UpdateManager::new(exe_dir.clone(), we_dir.clone(), scripts_dir.clone()));
     let browse_cache = Arc::new(RwLock::new(HashMap::new()));
     let workshop_cache = Arc::new(RwLock::new(HashMap::new()));
 
@@ -156,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
         dotnet,
         qr_download,
         metadata,
+        update,
         browse_cache,
         workshop_cache,
         we_dir,
@@ -192,6 +192,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/metadata/all", get(handle_metadata_all))
         .route("/api/metadata/save", post(handle_metadata_save))
         .route("/api/metadata/delete", post(handle_metadata_delete))
+        .route("/api/update/check", get(handle_update_check))
+        .route("/api/update/status", get(handle_update_status))
+        .route("/api/update/download", post(handle_update_download))
+        .route("/api/update/apply", post(handle_update_apply))
+        .route("/api/update/mock/release", get(handle_update_mock_release))
+        .route("/api/update/mock/binary", get(handle_update_mock_binary))
         .route("/api/workshop/browse", get(handle_workshop_browse))
         .route("/api/workshop/item", get(handle_workshop_item))
         .route(
@@ -205,7 +211,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/workshop/extract/status", get(handle_workshop_extract_status))
         .route("/api/workshop/delete", post(handle_workshop_delete))
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
+
+    let update_manager = Arc::clone(&state.update);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let mock = std::env::var("WENGINE_MOCK_UPDATE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        update_manager.check_for_updates(false, mock).await;
+    });
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 43196));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -364,6 +379,68 @@ async fn handle_dotnet_status(State(state): State<AppState>) -> Json<serde_json:
 async fn handle_dotnet_ensure(State(state): State<AppState>) -> Json<serde_json::Value> {
     state.dotnet.start_ensure();
     Json(serde_json::json!({ "ok": true }))
+}
+
+// Update handlers
+#[derive(Deserialize)]
+struct UpdateCheckQuery {
+    force: Option<bool>,
+    mock: Option<bool>,
+}
+
+async fn handle_update_check(
+    State(state): State<AppState>,
+    Query(q): Query<UpdateCheckQuery>,
+) -> Json<UpdateInfo> {
+    let force = q.force.unwrap_or(false);
+    let mock = q.mock.unwrap_or(false);
+    let info = state.update.check_for_updates(force, mock).await;
+    Json(info)
+}
+
+async fn handle_update_status(State(state): State<AppState>) -> Json<UpdateInfo> {
+    Json(state.update.get_info())
+}
+
+async fn handle_update_download(State(state): State<AppState>) -> Json<serde_json::Value> {
+    match state.update.start_download() {
+        Ok(_) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn handle_update_apply(State(state): State<AppState>) -> Json<serde_json::Value> {
+    match state.update.apply_update() {
+        Ok(_) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn handle_update_mock_release() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "tag_name": "v1.3.0-test",
+        "name": "WEngine-Plus v1.3.0-test (Local Test)",
+        "body": "Local test update without GitHub push",
+        "assets": [{
+            "name": "wengine-helper.exe",
+            "browser_download_url": "http://127.0.0.1:43196/api/update/mock/binary"
+        }]
+    }))
+}
+
+async fn handle_update_mock_binary() -> impl IntoResponse {
+    let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("wengine-helper.exe"));
+    match tokio::fs::read(&exe_path).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [("content-type", "application/octet-stream")],
+            bytes,
+        ).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            format!("Executable file not found: {}", e),
+        ).into_response(),
+    }
 }
 
 // Metadata handlers

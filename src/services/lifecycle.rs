@@ -59,6 +59,8 @@ fn now_sec() -> i64 {
         .as_secs() as i64
 }
 
+pub static IS_UPDATING: AtomicBool = AtomicBool::new(false);
+
 fn start_wallpaperui_watcher() {
     std::thread::spawn(|| {
         let mut sys = System::new();
@@ -87,6 +89,10 @@ fn start_wallpaperui_watcher() {
                 if !handle.is_null() {
                     WaitForSingleObject(handle, 0xFFFFFFFF); // INFINITE
                     CloseHandle(handle);
+                    if IS_UPDATING.load(Ordering::SeqCst) {
+                        println!("[Lifecycle] wallpaperui.exe closed, but update is underway. Not terminating worker.");
+                        return;
+                    }
                     println!("[Lifecycle] wallpaperui.exe closed! Terminating worker...");
                     std::process::exit(0);
                 }

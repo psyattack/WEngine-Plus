@@ -252,6 +252,82 @@ fn find_wallpaper_engine_scripts() -> Option<PathBuf> {
     None
 }
 
+pub fn find_wallpaper_engine_dir() -> PathBuf {
+    // 1. Running Wallpaper Engine process
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    for p in sys.processes().values() {
+        let name = p.name().to_string_lossy().to_lowercase();
+        if name == "wallpaper64.exe" || name == "wallpaper32.exe" {
+            if let Some(exe_path) = p.exe() {
+                if let Some(parent) = exe_path.parent() {
+                    if parent.join("wallpaper64.exe").exists() || parent.join("wallpaper32.exe").exists() {
+                        return parent.to_path_buf();
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Relative to current exe (e.g. ui/dist/scripts/../../..)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(dir) = exe_path.parent() {
+            if let Some(we) = dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+                if we.join("wallpaper64.exe").exists() || we.join("wallpaper32.exe").exists() {
+                    return we.to_path_buf();
+                }
+            }
+        }
+    }
+
+    // 3. Steam Uninstall Key
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Registry::*;
+        let uninstall_subkeys = [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 431960",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 431960",
+        ];
+        for sub in &uninstall_subkeys {
+            if let Some(loc) = query_reg_string(HKEY_LOCAL_MACHINE, sub, "InstallLocation") {
+                let p = PathBuf::from(loc);
+                if p.join("wallpaper64.exe").exists() || p.join("wallpaper32.exe").exists() {
+                    return p;
+                }
+            }
+            if let Some(loc) = query_reg_string(HKEY_CURRENT_USER, sub, "InstallLocation") {
+                let p = PathBuf::from(loc);
+                if p.join("wallpaper64.exe").exists() || p.join("wallpaper32.exe").exists() {
+                    return p;
+                }
+            }
+        }
+    }
+
+    // 4. Common candidate paths
+    let mut candidates = vec![
+        PathBuf::from(r"C:\Program Files\Wallpaper Engine"),
+        PathBuf::from(r"C:\Program Files (x86)\Wallpaper Engine"),
+        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\wallpaper_engine"),
+        PathBuf::from(r"C:\Program Files\Steam\steamapps\common\wallpaper_engine"),
+    ];
+    for drive in b'C'..=b'Z' {
+        let letter = drive as char;
+        candidates.push(PathBuf::from(format!(r"{}:\SteamLibrary\steamapps\common\wallpaper_engine", letter)));
+        candidates.push(PathBuf::from(format!(r"{}:\Steam\steamapps\common\wallpaper_engine", letter)));
+        candidates.push(PathBuf::from(format!(r"{}:\Games\Steam\steamapps\common\wallpaper_engine", letter)));
+        candidates.push(PathBuf::from(format!(r"{}:\Games\Wallpaper Engine", letter)));
+        candidates.push(PathBuf::from(format!(r"{}:\Wallpaper Engine", letter)));
+    }
+    for cand in candidates {
+        if cand.join("wallpaper64.exe").exists() || cand.join("wallpaper32.exe").exists() {
+            return cand;
+        }
+    }
+
+    PathBuf::from(r"C:\Program Files\Wallpaper Engine")
+}
+
 fn kill_other_helper_instances() {
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
@@ -262,7 +338,7 @@ fn kill_other_helper_instances() {
             continue;
         }
         let name = p.name().to_string_lossy().to_lowercase();
-        if name == "wengine-helper.exe" || name == "wengine-helper" {
+        if name.contains("wengine-helper") {
             p.kill();
         }
     }
@@ -419,5 +495,172 @@ pub fn run_setup_mode(auto_confirm: bool) {
     }
 
     wait_for_enter(should_wait);
+    std::process::exit(0);
+}
+
+pub fn run_silent_patch_mode(
+    we_dir: &Path,
+    scripts_dir: &Path,
+    old_pid: Option<u32>,
+    old_exe: Option<PathBuf>,
+) {
+    // 0. If old_pid is provided, wait up to 3 seconds for it to exit
+    if let Some(pid) = old_pid {
+        let mut sys = sysinfo::System::new();
+        for _ in 0..30 {
+            sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            let still_alive = sys.processes().keys().any(|p| p.as_u32() == pid);
+            if !still_alive {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    // 1. Wait for wallpaperui to close (up to 5 seconds)
+    let mut sys = sysinfo::System::new();
+    for _ in 0..20 {
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let has_ui = sys.processes().values().any(|p| {
+            let name = p.name().to_string_lossy().to_lowercase();
+            name == "wallpaperui.exe" || name == "wallpaperui"
+        });
+        if !has_ui {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    // Force-terminate any lingering wallpaperui processes if still alive
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    for p in sys.processes().values() {
+        let name = p.name().to_string_lossy().to_lowercase();
+        if name == "wallpaperui.exe" || name == "wallpaperui" {
+            p.kill();
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // 2. Kill other helper daemon instances (except ourselves)
+    kill_other_helper_instances();
+
+    // 3. Patch scripts.js with SCRIPTS_CONTENT
+    let target_scripts = scripts_dir.join("scripts.js");
+    let existing_content = fs::read_to_string(&target_scripts).unwrap_or_default();
+
+    // Create safety backup if not already present
+    let backup_path = target_scripts.with_file_name("scripts.js.bak");
+    if !backup_path.exists() && !existing_content.is_empty() {
+        let _ = fs::write(&backup_path, existing_content.as_bytes());
+    }
+
+    // Write updated scripts.js (retry up to 10 times in case of brief file lock)
+    for _ in 0..10 {
+        if fs::write(&target_scripts, SCRIPTS_CONTENT.as_bytes()).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    // 4. Clean up temporary files (.update and .old)
+    let update_file = scripts_dir.join("wengine-helper.exe.update");
+    if update_file.exists() {
+        let _ = fs::remove_file(&update_file);
+    }
+
+    let mut targets_to_clean = vec![
+        scripts_dir.join("wengine-helper.exe.old"),
+    ];
+    if let Some(p) = old_exe {
+        if !targets_to_clean.contains(&p) {
+            targets_to_clean.push(p);
+        }
+    }
+
+    for old_path in targets_to_clean {
+        if old_path.exists() {
+            let mut deleted = false;
+            for _ in 0..30 {
+                if fs::remove_file(&old_path).is_ok() || !old_path.exists() {
+                    deleted = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            if !deleted && old_path.exists() {
+                // If direct delete failed due to residual file locks or antivirus, spawn a detached hidden PowerShell command to delete it
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    let escaped = old_path.to_string_lossy().replace('\'', "''");
+                    let _ = std::process::Command::new("powershell")
+                        .args([
+                            "-NoProfile",
+                            "-WindowStyle", "Hidden",
+                            "-Command",
+                            &format!("Start-Sleep -Seconds 1; Remove-Item -Force -LiteralPath '{}' -ErrorAction SilentlyContinue", escaped),
+                        ])
+                        .creation_flags(0x08000000)
+                        .spawn();
+                }
+            }
+        }
+    }
+
+    // 5. Spawn new daemon process in background
+    let helper_exe = scripts_dir.join("wengine-helper.exe");
+    if helper_exe.exists() {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let mut cmd = std::process::Command::new(&helper_exe);
+            cmd.arg("--daemon");
+            cmd.current_dir(scripts_dir);
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            let _ = cmd.spawn();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::process::Command::new(&helper_exe).arg("--daemon").spawn();
+        }
+    }
+
+    // 6. Automatically reopen GUI: launch wallpaper64.exe (or wallpaper32.exe / launcher.exe)
+    let we_exe = if we_dir.join("wallpaper64.exe").exists() {
+        Some(we_dir.join("wallpaper64.exe"))
+    } else if we_dir.join("wallpaper32.exe").exists() {
+        Some(we_dir.join("wallpaper32.exe"))
+    } else if we_dir.join("launcher.exe").exists() {
+        Some(we_dir.join("launcher.exe"))
+    } else {
+        None
+    };
+
+    if let Some(exe) = we_exe {
+        // Small pause to let daemon bind to port 43196
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        #[cfg(windows)]
+        {
+            // CRITICAL: DO NOT use CREATE_NO_WINDOW when launching GUI process!
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.current_dir(we_dir);
+            if cmd.spawn().is_err() {
+                let escaped = exe.to_string_lossy().replace('\'', "''");
+                let escaped_dir = we_dir.to_string_lossy().replace('\'', "''");
+                let _ = std::process::Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-Command",
+                        &format!("Start-Process -FilePath '{}' -WorkingDirectory '{}'", escaped, escaped_dir),
+                    ])
+                    .spawn();
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::process::Command::new(&exe).current_dir(we_dir).spawn();
+        }
+    }
+
     std::process::exit(0);
 }
