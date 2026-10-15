@@ -345,61 +345,26 @@ fn kill_other_helper_instances() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 }
 
-fn install_scripts_file(scripts_path: &Path, should_wait: bool) {
-    let existing_content = fs::read_to_string(scripts_path).unwrap_or_default();
+pub fn run_setup_mode(silent: bool) {
+    let is_new_window = if !silent { setup_console() } else { false };
+    let should_wait = !silent && is_new_window;
 
-    // Check if script already matches embedded content (up-to-date)
-    if existing_content == SCRIPTS_CONTENT {
-        println!("[*] scripts.js is already up to date.");
-        return;
+    if !silent {
+        println!();
+        println!("==============================================================");
+        println!("                     WEngine Plus - Setup                     ");
+        println!("==============================================================");
+        println!();
     }
-
-    // Create safety backup once if not already present
-    let backup_path = scripts_path.with_file_name("scripts.js.bak");
-    if !backup_path.exists() && !existing_content.is_empty() {
-        print!("[*] Creating backup ({}) ... ", backup_path.file_name().unwrap_or_default().to_string_lossy());
-        match fs::write(&backup_path, existing_content.as_bytes()) {
-            Ok(_) => println!("OK"),
-            Err(e) => {
-                println!("FAILED ({})", e);
-                println!("[-] Warning: Could not create backup. Aborting for safety.");
-                wait_for_enter(should_wait);
-                std::process::exit(1);
-            }
-        }
-    } else if backup_path.exists() {
-        println!("[*] Existing backup found: {}", backup_path.display());
-    }
-
-    // Write updated scripts.js
-    print!("[*] Writing updated scripts.js ... ");
-    match fs::write(scripts_path, SCRIPTS_CONTENT.as_bytes()) {
-        Ok(_) => println!("OK"),
-        Err(e) => {
-            println!("FAILED ({})", e);
-            println!("[-] ERROR: Failed to write scripts.js.");
-            wait_for_enter(should_wait);
-            std::process::exit(1);
-        }
-    }
-}
-
-pub fn run_setup_mode(auto_confirm: bool) {
-    let is_new_window = setup_console();
-    let should_wait = is_new_window || (!auto_confirm);
-
-    println!();
-    println!("==============================================================");
-    println!("                     WEngine Plus - Setup                     ");
-    println!("==============================================================");
-    println!();
 
     let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("wengine-helper.exe"));
     let exe_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    // 1. Locate target scripts directory (Unified Single Flow)
-    println!("[1/3] Locating Wallpaper Engine scripts directory...");
+    // 1. Locate target scripts directory
+    if !silent {
+        println!("[1/3] Locating Wallpaper Engine scripts directory...");
+    }
 
     let target_dir = if exe_dir.join("scripts.js").exists() {
         // Fast path: already located directly in the scripts directory!
@@ -412,20 +377,53 @@ pub fn run_setup_mode(auto_confirm: bool) {
         match find_wallpaper_engine_scripts() {
             Some(dir) => dir,
             None => {
-                println!();
-                println!("[-] ERROR: Could not locate Wallpaper Engine scripts directory.");
-                println!("    Please manually place wengine-helper.exe into:");
-                println!(r"    <Wallpaper Engine>\ui\dist\scripts\");
-                wait_for_enter(should_wait);
+                if !silent {
+                    println!();
+                    println!("[-] ERROR: Could not locate Wallpaper Engine scripts directory.");
+                    println!("    Please manually place wengine-helper.exe into:");
+                    println!(r"    <Wallpaper Engine>\ui\dist\scripts\");
+                    wait_for_enter(should_wait);
+                }
                 std::process::exit(1);
             }
         }
     };
 
-    println!("[+] Target directory: {}", target_dir.display());
+    if !silent {
+        println!("[+] Target directory: {}", target_dir.display());
+        println!("[2/3] Installing wengine-helper daemon...");
+    }
 
-    // 2. Synchronize binary into target directory
-    println!("[2/3] Installing wengine-helper daemon...");
+    // 2. Wait for wallpaperui to close if running in silent mode (e.g. during auto-update)
+    if silent {
+        let mut sys = sysinfo::System::new();
+        for _ in 0..20 {
+            sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            let has_ui = sys.processes().values().any(|p| {
+                let name = p.name().to_string_lossy().to_lowercase();
+                name == "wallpaperui.exe" || name == "wallpaperui"
+            });
+            if !has_ui {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+
+        // Force-terminate any lingering wallpaperui processes if still alive
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        for p in sys.processes().values() {
+            let name = p.name().to_string_lossy().to_lowercase();
+            if name == "wallpaperui.exe" || name == "wallpaperui" {
+                p.kill();
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    // Terminate any other helper daemon instances (except ourselves)
+    kill_other_helper_instances();
+
+    // 3. Synchronize binary into target directory
     let target_exe = target_dir.join("wengine-helper.exe");
 
     let is_already_installed = if let (Ok(src_can), Ok(tgt_can)) = (exe_path.canonicalize(), target_exe.canonicalize()) {
@@ -435,29 +433,32 @@ pub fn run_setup_mode(auto_confirm: bool) {
     };
 
     if !is_already_installed {
-        // Terminate any running helper processes to prevent sharing violation
-        kill_other_helper_instances();
-
-        // Copy binary to target
         if let Err(e) = fs::copy(&exe_path, &target_exe) {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
-                println!("[!] Administrator permissions required to write to target directory.");
-                println!("[!] Requesting elevation...");
+                if !silent {
+                    println!("[!] Administrator permissions required to write to target directory.");
+                    println!("[!] Requesting elevation...");
+                }
+                let arg = if silent { " -ArgumentList '--silent'" } else { "" };
                 let _ = std::process::Command::new("powershell")
                     .args([
                         "-NoProfile",
                         "-Command",
-                        &format!("Start-Process -FilePath '{}' -Verb RunAs", exe_path.display())
+                        &format!("Start-Process -FilePath '{}'{} -Verb RunAs", exe_path.display(), arg)
                     ])
                     .status();
                 std::process::exit(0);
             } else {
-                println!("[-] ERROR copying binary: {}", e);
-                wait_for_enter(should_wait);
+                if !silent {
+                    println!("[-] ERROR copying binary: {}", e);
+                    wait_for_enter(should_wait);
+                }
                 std::process::exit(1);
             }
         }
-        println!("[+] Binary installed to: {}", target_exe.display());
+        if !silent {
+            println!("[+] Binary installed to: {}", target_exe.display());
+        }
 
         // Schedule deletion of original source binary upon exit
         #[cfg(windows)]
@@ -475,16 +476,137 @@ pub fn run_setup_mode(auto_confirm: bool) {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
             let _ = cmd.spawn();
         }
-    } else {
+    } else if !silent {
         println!("[*] Binary is already installed in target directory.");
     }
 
-    // 3. Install scripts.js
-    println!("[3/3] Installing scripts.js...");
+    // 4. Install scripts.js
+    if !silent {
+        println!("[3/3] Installing scripts.js...");
+    }
     let target_scripts = target_dir.join("scripts.js");
-    install_scripts_file(&target_scripts, should_wait);
+    let existing_content = fs::read_to_string(&target_scripts).unwrap_or_default();
 
-    // 4. Completion
+    // Create safety backup once if not already present
+    let backup_path = target_scripts.with_file_name("scripts.js.bak");
+    if !backup_path.exists() && !existing_content.is_empty() {
+        if !silent {
+            print!("[*] Creating backup ({}) ... ", backup_path.file_name().unwrap_or_default().to_string_lossy());
+        }
+        let _ = fs::write(&backup_path, existing_content.as_bytes());
+        if !silent {
+            println!("OK");
+        }
+    }
+
+    // Write updated scripts.js (retry loop in case of brief file lock)
+    if !silent {
+        print!("[*] Writing updated scripts.js ... ");
+    }
+    let mut written = false;
+    for _ in 0..10 {
+        if fs::write(&target_scripts, SCRIPTS_CONTENT.as_bytes()).is_ok() {
+            written = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    if !silent {
+        if written { println!("OK"); } else { println!("FAILED"); }
+    }
+
+    // 5. Clean up temporary files (.update and .old)
+    let update_file = target_dir.join("wengine-helper.exe.update");
+    if update_file.exists() {
+        let _ = fs::remove_file(&update_file);
+    }
+    let old_exe = target_dir.join("wengine-helper.exe.old");
+    if old_exe.exists() {
+        let mut deleted = false;
+        for _ in 0..30 {
+            if fs::remove_file(&old_exe).is_ok() || !old_exe.exists() {
+                deleted = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        if !deleted && old_exe.exists() {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let escaped = old_exe.to_string_lossy().replace('\'', "''");
+                let _ = std::process::Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-WindowStyle", "Hidden",
+                        "-Command",
+                        &format!("Start-Sleep -Seconds 1; Remove-Item -Force -LiteralPath '{}' -ErrorAction SilentlyContinue", escaped),
+                    ])
+                    .creation_flags(0x08000000)
+                    .spawn();
+            }
+        }
+    }
+
+    // 6. Spawn daemon process in background
+    let helper_exe = target_dir.join("wengine-helper.exe");
+    if helper_exe.exists() {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let mut cmd = std::process::Command::new(&helper_exe);
+            cmd.arg("--daemon");
+            cmd.current_dir(&target_dir);
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            let _ = cmd.spawn();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::process::Command::new(&helper_exe).arg("--daemon").spawn();
+        }
+    }
+
+    // 7. If silent (auto-update or automated setup), reopen GUI
+    if silent {
+        let we_dir = find_wallpaper_engine_dir();
+        let we_exe = if we_dir.join("wallpaper64.exe").exists() {
+            Some(we_dir.join("wallpaper64.exe"))
+        } else if we_dir.join("wallpaper32.exe").exists() {
+            Some(we_dir.join("wallpaper32.exe"))
+        } else if we_dir.join("launcher.exe").exists() {
+            Some(we_dir.join("launcher.exe"))
+        } else {
+            None
+        };
+
+        if let Some(exe) = we_exe {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            #[cfg(windows)]
+            {
+                let mut cmd = std::process::Command::new(&exe);
+                cmd.current_dir(&we_dir);
+                if cmd.spawn().is_err() {
+                    let escaped = exe.to_string_lossy().replace('\'', "''");
+                    let escaped_dir = we_dir.to_string_lossy().replace('\'', "''");
+                    let _ = std::process::Command::new("powershell")
+                        .args([
+                            "-NoProfile",
+                            "-Command",
+                            &format!("Start-Process -FilePath '{}' -WorkingDirectory '{}'", escaped, escaped_dir),
+                        ])
+                        .spawn();
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = std::process::Command::new(&exe).current_dir(&we_dir).spawn();
+            }
+        }
+
+        std::process::exit(0);
+    }
+
+    // 8. Completion for interactive setup
     println!();
     println!("==============================================================");
     println!("[SUCCESS] WEngine Plus successfully installed and ready!       ");
@@ -495,172 +617,5 @@ pub fn run_setup_mode(auto_confirm: bool) {
     }
 
     wait_for_enter(should_wait);
-    std::process::exit(0);
-}
-
-pub fn run_silent_patch_mode(
-    we_dir: &Path,
-    scripts_dir: &Path,
-    old_pid: Option<u32>,
-    old_exe: Option<PathBuf>,
-) {
-    // 0. If old_pid is provided, wait up to 3 seconds for it to exit
-    if let Some(pid) = old_pid {
-        let mut sys = sysinfo::System::new();
-        for _ in 0..30 {
-            sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-            let still_alive = sys.processes().keys().any(|p| p.as_u32() == pid);
-            if !still_alive {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-
-    // 1. Wait for wallpaperui to close (up to 5 seconds)
-    let mut sys = sysinfo::System::new();
-    for _ in 0..20 {
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        let has_ui = sys.processes().values().any(|p| {
-            let name = p.name().to_string_lossy().to_lowercase();
-            name == "wallpaperui.exe" || name == "wallpaperui"
-        });
-        if !has_ui {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-
-    // Force-terminate any lingering wallpaperui processes if still alive
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    for p in sys.processes().values() {
-        let name = p.name().to_string_lossy().to_lowercase();
-        if name == "wallpaperui.exe" || name == "wallpaperui" {
-            p.kill();
-        }
-    }
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // 2. Kill other helper daemon instances (except ourselves)
-    kill_other_helper_instances();
-
-    // 3. Patch scripts.js with SCRIPTS_CONTENT
-    let target_scripts = scripts_dir.join("scripts.js");
-    let existing_content = fs::read_to_string(&target_scripts).unwrap_or_default();
-
-    // Create safety backup if not already present
-    let backup_path = target_scripts.with_file_name("scripts.js.bak");
-    if !backup_path.exists() && !existing_content.is_empty() {
-        let _ = fs::write(&backup_path, existing_content.as_bytes());
-    }
-
-    // Write updated scripts.js (retry up to 10 times in case of brief file lock)
-    for _ in 0..10 {
-        if fs::write(&target_scripts, SCRIPTS_CONTENT.as_bytes()).is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-
-    // 4. Clean up temporary files (.update and .old)
-    let update_file = scripts_dir.join("wengine-helper.exe.update");
-    if update_file.exists() {
-        let _ = fs::remove_file(&update_file);
-    }
-
-    let mut targets_to_clean = vec![
-        scripts_dir.join("wengine-helper.exe.old"),
-    ];
-    if let Some(p) = old_exe {
-        if !targets_to_clean.contains(&p) {
-            targets_to_clean.push(p);
-        }
-    }
-
-    for old_path in targets_to_clean {
-        if old_path.exists() {
-            let mut deleted = false;
-            for _ in 0..30 {
-                if fs::remove_file(&old_path).is_ok() || !old_path.exists() {
-                    deleted = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
-            if !deleted && old_path.exists() {
-                // If direct delete failed due to residual file locks or antivirus, spawn a detached hidden PowerShell command to delete it
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    let escaped = old_path.to_string_lossy().replace('\'', "''");
-                    let _ = std::process::Command::new("powershell")
-                        .args([
-                            "-NoProfile",
-                            "-WindowStyle", "Hidden",
-                            "-Command",
-                            &format!("Start-Sleep -Seconds 1; Remove-Item -Force -LiteralPath '{}' -ErrorAction SilentlyContinue", escaped),
-                        ])
-                        .creation_flags(0x08000000)
-                        .spawn();
-                }
-            }
-        }
-    }
-
-    // 5. Spawn new daemon process in background
-    let helper_exe = scripts_dir.join("wengine-helper.exe");
-    if helper_exe.exists() {
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            let mut cmd = std::process::Command::new(&helper_exe);
-            cmd.arg("--daemon");
-            cmd.current_dir(scripts_dir);
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-            let _ = cmd.spawn();
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = std::process::Command::new(&helper_exe).arg("--daemon").spawn();
-        }
-    }
-
-    // 6. Automatically reopen GUI: launch wallpaper64.exe (or wallpaper32.exe / launcher.exe)
-    let we_exe = if we_dir.join("wallpaper64.exe").exists() {
-        Some(we_dir.join("wallpaper64.exe"))
-    } else if we_dir.join("wallpaper32.exe").exists() {
-        Some(we_dir.join("wallpaper32.exe"))
-    } else if we_dir.join("launcher.exe").exists() {
-        Some(we_dir.join("launcher.exe"))
-    } else {
-        None
-    };
-
-    if let Some(exe) = we_exe {
-        // Small pause to let daemon bind to port 43196
-        std::thread::sleep(std::time::Duration::from_millis(600));
-        #[cfg(windows)]
-        {
-            // CRITICAL: DO NOT use CREATE_NO_WINDOW when launching GUI process!
-            let mut cmd = std::process::Command::new(&exe);
-            cmd.current_dir(we_dir);
-            if cmd.spawn().is_err() {
-                let escaped = exe.to_string_lossy().replace('\'', "''");
-                let escaped_dir = we_dir.to_string_lossy().replace('\'', "''");
-                let _ = std::process::Command::new("powershell")
-                    .args([
-                        "-NoProfile",
-                        "-Command",
-                        &format!("Start-Process -FilePath '{}' -WorkingDirectory '{}'", escaped, escaped_dir),
-                    ])
-                    .spawn();
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = std::process::Command::new(&exe).current_dir(we_dir).spawn();
-        }
-    }
-
     std::process::exit(0);
 }

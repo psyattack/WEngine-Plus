@@ -96,11 +96,9 @@ async fn main() -> anyhow::Result<()> {
         exe_dir.clone()
     };
 
-    let has_silent_patch = args.iter().any(|a| a == "--silent-patch-script" || a == "--silent-patch");
-    if has_silent_patch {
-        let old_pid = args.windows(2).find(|w| w[0] == "--old-pid").and_then(|w| w[1].parse().ok());
-        let old_exe = args.windows(2).find(|w| w[0] == "--old-exe").map(|w| PathBuf::from(&w[1]));
-        setup::run_silent_patch_mode(&we_dir, &scripts_dir, old_pid, old_exe);
+    let has_silent_flag = args.iter().any(|a| a == "--silent" || a == "-s");
+    if has_silent_flag {
+        setup::run_setup_mode(true);
         return Ok(());
     }
 
@@ -113,8 +111,7 @@ async fn main() -> anyhow::Result<()> {
     let is_daemon = has_daemon_flag || is_parent_we;
 
     if !is_daemon {
-        let auto_confirm = args.iter().any(|a| a == "-y" || a == "--yes");
-        setup::run_setup_mode(auto_confirm);
+        setup::run_setup_mode(false);
         return Ok(());
     }
 

@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "wengine-helper"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

@@ -90,11 +90,9 @@ flowchart LR
 
 ---
 
-## 🔍 Detailed Modification Report
+## 🔍 Frontend (`scripts.js`) Technical Diff Reference
 
-For a complete, line-by-line technical audit of all changes between the original Wallpaper Engine script and the enhanced `scripts.js`, see:
-
-[**DIFF.md — Comprehensive Modification Diff**](DIFF.md)
+For a complete, line-by-line technical audit of all changes between the original Wallpaper Engine script and the enhanced `scripts.js`, see: [**DIFF.md**](DIFF.md)
 
 ---
 
@@ -123,9 +121,9 @@ For a complete, line-by-line technical audit of all changes between the original
 
 | Flag | Action |
 | :--- | :--- |
-| `wengine-helper.exe` | **Setup (Default)**: Inspects target, install, creates backup, applies patch, prompts for keypress. |
-| `wengine-helper.exe -y` | **Silent Setup**: Automatically setup and exits without confirmation prompt. |
-| `wengine-helper.exe --daemon` | **Daemon Mode**: Starts background Axum REST server on port `43196`. |
+| `wengine-helper.exe` | **Setup (Default)**: Inspects target, installs, creates backup, applies patch, prompts for keypress. |
+| `wengine-helper.exe --silent` (or `-s`) | **Silent Setup**: Automatically sets up, closes/restarts Wallpaper Engine GUI, and exits without prompts. |
+| `wengine-helper.exe --daemon` (or `-d`) | **Daemon Mode**: Starts background Axum REST server on port `43196`. |
 
 ---
 

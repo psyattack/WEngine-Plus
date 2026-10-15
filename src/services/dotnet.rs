@@ -130,68 +130,136 @@ impl DotnetManager {
     }
 
     pub async fn run_ensure(&self) -> anyhow::Result<Option<PathBuf>> {
+        self.run_ensure_with_callback(None).await
+    }
+
+    pub async fn run_ensure_with_callback(
+        &self,
+        on_progress: Option<Arc<dyn Fn(f32, &str) + Send + Sync>>,
+    ) -> anyhow::Result<Option<PathBuf>> {
         // If system runtime is present, nothing to download
         if is_system_dotnet_installed() {
-            let mut guard = self.status.write();
-            guard.phase = DotnetPhase::Ready;
-            guard.message = "System .NET Runtime 8/9/10 found".to_string();
-            guard.progress = Some(100.0);
+            let msg = "System .NET Runtime 8/9/10 found".to_string();
+            {
+                let mut guard = self.status.write();
+                guard.phase = DotnetPhase::Ready;
+                guard.message = msg.clone();
+                guard.progress = Some(100.0);
+            }
+            if let Some(ref cb) = on_progress {
+                cb(100.0, &msg);
+            }
             return Ok(None);
         }
 
         let dotnet_dir = self.base_dir.join("dotnet");
         if is_portable_runtime_valid(&dotnet_dir) {
-            let mut guard = self.status.write();
-            guard.phase = DotnetPhase::Ready;
-            guard.message = "Portable .NET Runtime ready".to_string();
-            guard.progress = Some(100.0);
+            let msg = "Portable .NET Runtime ready".to_string();
+            {
+                let mut guard = self.status.write();
+                guard.phase = DotnetPhase::Ready;
+                guard.message = msg.clone();
+                guard.progress = Some(100.0);
+            }
+            if let Some(ref cb) = on_progress {
+                cb(100.0, &msg);
+            }
             return Ok(Some(dotnet_dir));
         }
 
         let zip_path = self.base_dir.join("dotnet-runtime.zip");
         std::fs::create_dir_all(&self.base_dir)?;
 
+        let start_msg = format!("Downloading .NET Runtime {} portable...", DOTNET_RUNTIME_VERSION);
         {
             let mut guard = self.status.write();
             guard.phase = DotnetPhase::Downloading;
-            guard.message = format!("Downloading .NET Runtime {} portable...", DOTNET_RUNTIME_VERSION);
+            guard.message = start_msg.clone();
             guard.progress = Some(0.0);
+        }
+        if let Some(ref cb) = on_progress {
+            cb(0.0, &start_msg);
         }
 
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .build()?;
 
-        let response = client.get(DOTNET_RUNTIME_URL).send().await?;
+        let mut response = client.get(DOTNET_RUNTIME_URL).send().await?;
         if !response.status().is_success() {
             anyhow::bail!("Failed to download .NET Runtime: HTTP {}", response.status());
         }
 
         let total_size = response.content_length().unwrap_or(0);
-        let bytes = response.bytes().await?;
-        std::fs::write(&zip_path, &bytes)?;
+        let _ = std::fs::remove_file(&zip_path);
 
-        let progress = if total_size > 0 {
-            (bytes.len() as f32 / total_size as f32) * 100.0
-        } else {
-            100.0
-        };
+        let mut file = tokio::fs::File::create(&zip_path).await?;
+        let mut downloaded: u64 = 0;
 
+        while let Some(chunk) = response.chunk().await? {
+            use tokio::io::AsyncWriteExt;
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+
+            let progress = if total_size > 0 {
+                (downloaded as f32 / total_size as f32) * 100.0
+            } else {
+                0.0
+            };
+
+            let msg = if total_size > 0 {
+                format!(
+                    "Downloading .NET Runtime {} ({:.1} MB / {:.1} MB)...",
+                    DOTNET_RUNTIME_VERSION,
+                    downloaded as f32 / 1_048_576.0,
+                    total_size as f32 / 1_048_576.0
+                )
+            } else {
+                format!(
+                    "Downloading .NET Runtime {} ({:.1} MB)...",
+                    DOTNET_RUNTIME_VERSION,
+                    downloaded as f32 / 1_048_576.0
+                )
+            };
+
+            {
+                let mut guard = self.status.write();
+                guard.phase = DotnetPhase::Downloading;
+                guard.progress = Some(progress.min(99.0));
+                guard.message = msg.clone();
+            }
+            if let Some(ref cb) = on_progress {
+                cb(progress.min(99.0), &msg);
+            }
+        }
+
+        use tokio::io::AsyncWriteExt;
+        file.flush().await?;
+        drop(file);
+
+        let extract_msg = format!("Extracting .NET Runtime ({:.1} MB)...", downloaded as f32 / 1_048_576.0);
         {
             let mut guard = self.status.write();
             guard.phase = DotnetPhase::Extracting;
-            guard.message = format!("Extracting .NET Runtime ({:.1} MB)...", bytes.len() as f32 / 1_048_576.0);
-            guard.progress = Some(progress);
+            guard.message = extract_msg.clone();
+            guard.progress = Some(100.0);
+        }
+        if let Some(ref cb) = on_progress {
+            cb(100.0, &extract_msg);
         }
 
         extract_zip(&zip_path, &dotnet_dir)?;
         let _ = std::fs::remove_file(&zip_path);
 
+        let done_msg = "Portable .NET Runtime ready".to_string();
         {
             let mut guard = self.status.write();
             guard.phase = DotnetPhase::Ready;
-            guard.message = "Portable .NET Runtime ready".to_string();
+            guard.message = done_msg.clone();
             guard.progress = Some(100.0);
+        }
+        if let Some(ref cb) = on_progress {
+            cb(100.0, &done_msg);
         }
 
         Ok(Some(dotnet_dir))

@@ -99,7 +99,7 @@ pub fn build_browse_url(query: &BrowseQuery) -> String {
             .append_pair("browsesort", sort_param)
             .append_pair("section", "readytouseitems")
             .append_pair("p", &query.page.max(1).to_string())
-            .append_pair("numperpage", &per_page.to_string())
+            .append_pair("num_per_page", &per_page.to_string())
             .append_pair("actualsort", sort_param);
 
         if let Some(f) = filter_param {

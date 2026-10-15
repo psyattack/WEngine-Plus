@@ -95,6 +95,14 @@ impl PluginManager {
             st.repkg_ready = repkg_ready;
             st.dotnet_ready = dotnet_ready;
             st.ready = depot_ready && repkg_ready && dotnet_ready;
+
+            let dn_st = self.dotnet.get_status();
+            if matches!(dn_st.phase, crate::services::dotnet::DotnetPhase::Downloading | crate::services::dotnet::DotnetPhase::Extracting) {
+                st.is_downloading = true;
+                st.current_plugin = ".NET Runtime".to_string();
+                st.progress = dn_st.progress.unwrap_or(0.0);
+                st.message = dn_st.message;
+            }
         }
         st
     }
@@ -154,9 +162,17 @@ impl PluginManager {
                 guard.is_downloading = true;
                 guard.current_plugin = ".NET Runtime".to_string();
                 guard.progress = 0.0;
-                guard.message = "Downloading .NET Runtime 9.0 portable...".to_string();
+                guard.message = format!("Downloading .NET Runtime {} portable...", crate::services::dotnet::DOTNET_RUNTIME_VERSION);
             }
-            self.dotnet.run_ensure().await?;
+            let pm_status = Arc::clone(&self.status);
+            let cb = Arc::new(move |pct: f32, msg: &str| {
+                let mut guard = pm_status.write();
+                guard.is_downloading = true;
+                guard.current_plugin = ".NET Runtime".to_string();
+                guard.progress = pct;
+                guard.message = msg.to_string();
+            });
+            self.dotnet.run_ensure_with_callback(Some(cb)).await?;
         }
 
         for plugin in PLUGINS {
@@ -189,17 +205,52 @@ impl PluginManager {
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .build()?;
 
-        let response = client.get(plugin.download_url).send().await?;
+        let mut response = client.get(plugin.download_url).send().await?;
         if !response.status().is_success() {
             anyhow::bail!("Failed to download {}: HTTP {}", plugin.name, response.status());
         }
 
-        let bytes = response.bytes().await?;
-        std::fs::write(&archive_path, &bytes)?;
+        let total_size = response.content_length().unwrap_or(0);
+        let _ = std::fs::remove_file(&archive_path);
+        let mut file = tokio::fs::File::create(&archive_path).await?;
+        let mut downloaded: u64 = 0;
+
+        while let Some(chunk) = response.chunk().await? {
+            use tokio::io::AsyncWriteExt;
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+
+            let progress = if total_size > 0 {
+                (downloaded as f32 / total_size as f32) * 80.0
+            } else {
+                40.0
+            };
+
+            let msg = if total_size > 0 {
+                format!(
+                    "Downloading {} ({:.1} MB / {:.1} MB)...",
+                    plugin.name,
+                    downloaded as f32 / 1_048_576.0,
+                    total_size as f32 / 1_048_576.0
+                )
+            } else {
+                format!("Downloading {}...", plugin.name)
+            };
+
+            let mut guard = self.status.write();
+            guard.is_downloading = true;
+            guard.current_plugin = plugin.name.to_string();
+            guard.progress = progress;
+            guard.message = msg;
+        }
+
+        use tokio::io::AsyncWriteExt;
+        file.flush().await?;
+        drop(file);
 
         {
             let mut guard = self.status.write();
-            guard.progress = 60.0;
+            guard.progress = 85.0;
             guard.message = format!("Extracting {}...", plugin.name);
         }
 

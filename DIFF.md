@@ -1,652 +1,361 @@
-# Comprehensive Diff Report:
+# WEngine-Plus: Frontend (`scripts.js`) Technical Diff Reference
 
-This document provides a complete, structured, and exhaustive technical comparison between the original Wallpaper Engine UI script and the enhanced WEngine-Plus UI script.
+This document provides a technical comparison between the original Wallpaper Engine UI script (`scripts.js`) and the enhanced WEngine-Plus UI script. It serves as an architectural reference and comprehensive diff catalog of all client-side extensions.
+
+> [!NOTE]
+> This specification documents changes made strictly to `scripts.js`. Background daemon modules (`wengine-helper.exe`) and backend service implementations are outside the scope of this document.
 
 ---
 
 ## 1. Executive Summary & Metrics
 
-| Metric | Original | Current | Delta |
+| Metric | Original (`scripts.js`) | WEngine-Plus (`scripts.js`) | Delta |
 | :--- | :--- | :--- | :--- |
-| **File Size** | 1,186,902 bytes (~1.18 MB) | 2,094,222 bytes (~2.09 MB) | +907,320 bytes (+76.4%) |
-| **Line Count (raw)** | 48 lines (minified) | 39,162 lines (formatted) | Unminified + extended |
-| **Line Count (normalized)** | 36,547 lines (formatted) | 39,968 lines (formatted) | +3,731 additions, -310 deletions |
-| **Modified Code Hunks** | Baseline | 54 distinct hunks | Core framework extensions |
+| **File Size** | ~1.18 MB (1,186,902 bytes) | ~2.11 MB (2,113,755 bytes) | +926,853 bytes (+78.1%) |
+| **Formatting** | Minified (48 lines) | Unminified / Structured JS | Formatted for maintainability |
+| **Line Count** | 48 physical lines | 39,571 lines | +39,523 lines |
+| **Architectural Scope** | Standalone CEF UI | Hybrid Desktop Client | IPC, isolated filters, caching, safety |
 
 ---
 
-## 2. High-Level Architectural Changes
+## 2. High-Level Integration Architecture
 
-The modifications transform the Wallpaper Engine CEF frontend into a fully featured hybrid desktop application by integrating the background daemon (`wengine-helper.exe`). The modifications span eight primary domains:
+All modifications in `scripts.js` integrate directly into Wallpaper Engine's AngularJS (1.x) frontend framework:
 
 ```mermaid
 flowchart TD
-    subgraph UI ["Wallpaper Engine UI (scripts.js)"]
-        HelperBridge["WengineHelper IPC Bridge"]
-        WorkshopUI["Workshop Browser & Pagination"]
-        FilterUI["Advanced Filters & Tag Chips"]
-        MetadataUI["Installed Metadata & Details Panel"]
-        ExtractUI["Extraction & Download Manager"]
-        AuthUI["Steam QR & Cookie Auth Controller"]
-        StartupUI["Service & Auth Status Banners"]
+    subgraph Titlebar ["Titlebar & Window Controls"]
+        TitleSanitizer["Title Sanitization (Strip '- Steam Edition')"]
+        VersionBadge["WEngine+ Version & Update Indicator (top: 24px)"]
+        UpdateControls["Update Status & One-Click Application"]
     end
 
-    subgraph Backend ["WEngine Helper Daemon (wengine-helper.exe)"]
-        AxumRouter["Axum HTTP Server (:43196)"]
-        SteamClient["Steam SSR Parser & API Client"]
-        MetaStore["metadata.json Storage"]
-        Extractor["Zip/Rar Wallpaper Unpacker"]
-        Downloader["Multi-Threaded Downloader"]
-        AuthManager["AuthManager (Session & In-Flight Status)"]
+    subgraph CoreBridge ["IPC Client Bridge (window.WengineHelper)"]
+        DaemonControl["Daemon Lifecycle & Ping (:43196)"]
+        AuthBridge["Steam Authentication (QR / Cookie)"]
+        BrowseBridge["Workshop Browse & Search Proxy"]
+        MetaBridge["Metadata Persistence (metadata.json)"]
+        PluginBridge["Plugin Management & .NET Runtime Streaming"]
     end
 
-    HelperBridge <-->|HTTP / REST JSON| AxumRouter
-    WorkshopUI --> HelperBridge
-    FilterUI --> HelperBridge
-    MetadataUI --> HelperBridge
-    ExtractUI --> HelperBridge
-    AuthUI --> HelperBridge
-    StartupUI --> HelperBridge
-    AxumRouter --> SteamClient
-    AxumRouter --> MetaStore
-    AxumRouter --> Extractor
-    AxumRouter --> Downloader
-    AxumRouter --> AuthManager
-```
+    subgraph BrowserViews ["Browser View Extensions (browsewallpapers.html)"]
+        StartupBanner["Daemon Startup & Steam Login Status Alert"]
+        DownloadBanner["Plugin & .NET Progress Banner (Workshop + Installed)"]
+        IndependentFilters["Source-Isolated Filter Drawer & Tag Chips"]
+        PaginationBar["50-Item Pagination Bar & Jump Navigation"]
+        ExtractToast["Real-Time Archive Extraction Toast (.pkg / .bin)"]
+    end
 
-1. **Background Daemon IPC Bridge (`window.WengineHelper`)**: Full asynchronous communication with the local Axum HTTP server on port `43196` (heartbeats, lifecycle, downloads, extraction, authentication).
-2. **Metadata Persistence & Steam 429 Prevention**: Real-time reading of wallpaper metadata directly from disk (`scripts/metadata.json`). Eliminated repetitive Steam community scraping when browsing installed wallpapers to avoid HTTP 429 rate limits.
-3. **Steam Workshop Pagination & Query Interception**: Overridden `queryWorkshop` to support seamless 50 items/page pagination, page jump navigation, query caching, and SSR query parsing.
-4. **Enhanced Filtering & Tag Chip System**: Custom category, type, resolution, and content-rating dropdowns, 3-state tag chips (Off / Included / Excluded), and an `Incompatible Items` filter toggle. Installed and Workshop maintain independent helper-filter state and source-specific author filters.
-5. **Wallpaper Extraction & File Operations**: In-place single and batch extraction of `.pkg` / `.bin` scene wallpapers into editable project folders with live status toasts.
-6. **Wallpaper Deletion System**: Safe single and batch deletion of inactive wallpapers from UI grid and disk (`/api/workshop/delete`). Active wallpapers are protected from deletion; attempting to delete active wallpapers displays a notification prompt advising the user to apply another wallpaper first.
-7. **Steam Account & QR Code Authentication**: Integrated AngularJS modal controller and UI template for logging into Steam via mobile QR code or cookies.
-8. **Service Startup & Steam Authorization Status Feedback**: Automatic background service launch verification (`ensureRunning()`), live status notifications via top banner, real-time polling of Steam authentication state (`/api/auth/status` with `is_logging_in` tracking), and smooth auto-dismissal on completion.
+    subgraph DataProtection ["Safety & State Management"]
+        MetaPriority["Local Metadata Priority (Steam 429 Prevention)"]
+        ActiveWallProtect["Desktop-Applied Wallpaper Delete Protection"]
+        PreviewRelease["Two-Tier Preview Reversion & Handle Release"]
+    end
 
----
-
-## 3. Detailed Component-by-Component Diff
-
-### 3.1. Global Tag Constants & Resolution Lists
-* **Location**: Lines ~627–1180 in formatted source.
-* **Diff Type**: **Added**
-
-#### Removed:
-None (entirely new subsystem).
-
-#### Added:
-Global arrays defining standardized Steam Workshop tags for resolutions, types, categories, and age ratings:
-```javascript
-+ window._helperResolutionTagsList = [
-+   "Standard Definition", "1280 x 720", "1366 x 768", "1920 x 1080",
-+   "2560 x 1440", "3840 x 2160", "Ultra Wide 2560 x 1080",
-+   "Ultra Wide 3440 x 1440", "Ultra Wide 5120 x 2160", "Dual 3840 x 1080",
-+   "Dual 5120 x 1440", "Triple 5760 x 1080", "Portrait 1080 x 1920", ...
-+ ];
-+ window._helperCategoryTagsList = ["Anime", "Games", "Fantasy", "Sci-Fi", ...];
-+ window._helperTypeTagsList = ["Scene", "Video", "Web", "Application"];
-+ window._helperAgeRatingTagsList = ["Everyone", "Questionable", "Mature"];
-+ window._helperMiscTagsList = ["Approved", "Audio responsive", "Customizable", "HDR", ...];
-+ window._helperGenreTagsList = ["Abstract", "Animals", "Cyberpunk", "Landscape", ...];
+    Titlebar --> CoreBridge
+    BrowserViews --> CoreBridge
+    DataProtection --> CoreBridge
 ```
 
 ---
 
-### 3.2. Background Daemon Bridge (`window.WengineHelper`)
-* **Location**: Lines ~1235–1860 in formatted source.
-* **Diff Type**: **Added & Replaced**
-
-#### Removed:
-Default hardcoded trend parameter:
-```javascript
-- let me = "trend_year";
-```
-
-#### Added:
-- Full `window.WengineHelper` object implementing daemon process execution, health-checks, and REST endpoints:
-```javascript
-+ let me = "trend_week";
-+ window.WengineHelper = {
-+   url: "http://127.0.0.1:43196",
-+   ping: function() { return fetch(this.url + "/api/ping").then(...); },
-+   ensureRunning: function() {
-+     // Launches wengine-helper.exe with --daemon flag via window.ui.shellexecute
-+     var workerExe = dir + "\\wengine-helper.exe";
-+     window.ui.shellexecute(workerExe, "--daemon");
-+     return self.waitForPing(15, 250);
-+   },
-+   getItemDetails: function(workshopId) {
-+     return fetch(this.url + "/api/workshop/item?id=" + encodeURIComponent(workshopId)).then(...);
-+   },
-+   getAllMetadata: function() { return fetch(this.url + "/api/metadata/all").then(...); },
-+   saveMetadata: function(id, meta) { return fetch(this.url + "/api/metadata/save", ...); },
-+   deleteMetadata: function(id) { return fetch(this.url + "/api/metadata/delete", ...); },
-+   downloadItem: function(workshopId, title) { return fetch(this.url + "/api/workshop/download", ...); },
-+   getDownloadsAll: function() { return fetch(this.url + "/api/workshop/download/all").then(...); },
-+   extractItem: function(workshopId, title, file) { return fetch(this.url + "/api/workshop/extract", ...); },
-+   browse: function(params) { return fetch(this.url + "/api/workshop/browse?" + query).then(...); },
-+   getAuthStatus: function() { return fetch(this.url + "/api/auth/status").then(...); },
-+   ...
-+ };
-```
+## 3. Comprehensive Feature & Component Diff
 
 ---
 
-### 3.3. Metadata Storage & Installed Wallpaper Selection
-* **Location**: Lines ~1860–2050 and ~5360–5425.
-* **Diff Type**: **Modified & Fixed**
+### 3.1. Window Title Sanitization & Version Indicator
+* **Location in Source**: Directive `titlebar` (lines ~450–550), filter `localeLoader` (lines ~100–150), template `views/templates/titlebar.html` (line ~39519).
+* **Diff Classification**: UI Extension & Title Formatting.
 
-#### Removed:
-1. Native fallback in `callbackWallpaperSelected` that only read standard `l(e)`:
-```javascript
-- "installed" === (W.currentSelection = e).status && l(e);
-```
-2. Local project fallback in `W.getMetaForWallpaper` that caused installed wallpapers without metadata to return their project object with `["Everyone", "Local"]` tags:
-```javascript
-- if (w.author || w.file_size || (w.tags && w.tags !== "Everyone,Local")) {
--   return w;
-- }
-```
-3. Unfiltered tag rendering falling back to project tags:
-```javascript
-- var meta = W.getInstalledMetadata(item) || item;
-- var tagsRaw = meta.tags || (item && item.tags);
-```
+#### Original Baseline:
+* The window title displays the raw caption string provided by localization files, appending `- Steam Edition` (e.g., `Wallpaper Engine 2.8.42 - Steam Edition`).
+* The titlebar contains only standard window control buttons (minimize, maximize, close, mini-mode) and the title text. No client version indicator or update management interface exists.
 
-#### Added:
-1. Robust `W.getMetaForWallpaper` reading strictly from `metadata.json` in Installed mode:
-```javascript
-+ W.getMetaForWallpaper = function (w) {
-+   if (!w) return null;
-+   var id = W.getWallpaperWorkshopId ? W.getWallpaperWorkshopId(w) : (w.workshopid || w.pubfileid || w.id);
-+   if (W.installedMetadata) {
-+     if (id && W.installedMetadata[String(id)]) return W.installedMetadata[String(id)];
-+     if (w.title && W.installedMetadata[w.title]) return W.installedMetadata[w.title];
-+     for (var k in W.installedMetadata) {
-+       var itm = W.installedMetadata[k];
-+       if (itm && (itm.pubfileid === String(id) || itm.workshopid === String(id) || itm.title === w.title)) return itm;
-+     }
-+   }
-+   if (W.sourceIsWorkshop && (w.author || w.file_size || (w.tags && w.tags !== "Everyone,Local"))) return w;
-+   return null;
-+ };
-```
-2. Smart `callbackWallpaperSelected` that prevents Steam 429 errors by bypassing the network when metadata already exists on disk:
-```javascript
-+ var isInstalledMode = W.sourceIsInstalled || !W.sourceIsWorkshop;
-+ var curMeta = W.getMetaForWallpaper ? W.getMetaForWallpaper(e) : null;
-+ if (curMeta) {
-+   // Apply existing metadata directly from file
-+   for (var sk = 0; sk < safeKeys.length; sk++) {
-+     var k = safeKeys[sk];
-+     if (curMeta[k] !== undefined && curMeta[k] !== null && curMeta[k] !== "") {
-+       e[k] = curMeta[k];
-+       if (W.currentSelection) W.currentSelection[k] = curMeta[k];
-+     }
-+   }
-+ }
-+ // NEVER hit network if metadata is already cached on disk for installed wallpapers
-+ if (!isInstalledMode || !curMeta) {
-+   window.WengineHelper.getItemDetails(wid).then(function (det) {
-+     if (det) {
-+       if (isInstalledMode) {
-+         W.installedMetadata[String(wid)] = det;
-+         window.WengineHelper.saveMetadata(wid, det); // Persist once for future sessions
-+       }
-+       ...
-+     }
-+   });
-+ }
-```
-3. Sanitized tag chips excluding system `"Local"` tag:
-```javascript
-+ W.getInstalledMetadataTags = function (item) {
-+   var meta = W.getInstalledMetadata(item);
-+   if (!meta) return [];
-+   var tagsRaw = meta.tags;
-+   if (!tagsRaw) return [];
-+   var res = [];
-+   // Parse and filter out "Local"
-+   parts.forEach(function(p) {
-+     var t = p.trim();
-+     if (t && t.toLowerCase() !== "local" && res.indexOf(t) === -1) res.push(t);
-+   });
-+   return res;
-+ };
-```
+#### WEngine-Plus Implementation:
+1. **Dynamic Removal of `- Steam Edition`**:
+   - `localeLoader` sanitizes `ui_caption_browse` via regex, and a `MutationObserver` on `.titlebar .title` ensures any late or dynamic caption updates maintain the clean title:
+     ```javascript
+     e && e.ui_caption_browse && (e.ui_caption_browse = e.ui_caption_browse.replace(/\s*-\s*Steam\s+Edition/gi, ""));
+     ```
+   - The title consistently renders as `Wallpaper Engine <version>`.
+2. **Version Display & Update Management Widget**:
+   - A dedicated version widget (`.browseWallpaperVersionContainer`) is positioned in the titlebar, centered horizontally under the main title (`top: 24px; left: 0; right: 0; margin: 0 auto; width: max-content;`).
+   - Clicking the version label triggers an asynchronous update check; `Shift+Click` triggers an instant mock update test.
+   - Dynamically renders state badges: `Checking updates...`, `Latest version`, `New version available` with an `Update` button, real-time download percentage progress, and an error badge with a `Retry` button.
+3. **Z-Index Layer Alignment**:
+   - The version widget operates with default stacking context (`z-index: auto` / stack level 0), matching `.titlebar .title`.
+   - Internal overlays such as monitor selection (`.browseMonitorSelectionContainer`, `z-index: 5`) and modal dialogs (`.modal`, `z-index: 1050`) render above the version widget, preventing the indicator from floating over modal content.
 
 ---
 
-### 3.4. Sorting System Fixes & Custom Comparators
-* **Location**: Lines ~2990–3060 and ~3650–3660.
-* **Diff Type**: **Modified & Fixed**
+### 3.2. Background Daemon IPC Bridge (`window.WengineHelper`)
+* **Location in Source**: Lines ~1230–1860.
+* **Diff Classification**: Architecture Addition (Client-Daemon Bridge).
 
-#### Removed:
-Broken native sort comparators that caused crashes or incorrect ordering when `filesize` was 0 or titles were missing:
-```javascript
-- return e.filesize === t.filesize && 0 === e.filesize
--   ? he.name(e, t)
--   : t.filesize < e.filesize ? -1 : 1;
-```
-```javascript
-- ? i.sort(be[W.filter.sort])
-- : i.sort(he[W.filter.sort])
-```
+#### Original Baseline:
+* Default trending filter parameter is hardcoded to `let me = "trend_year";`.
+* All Workshop communications rely on internal CEF IPC hooks (`j.callDeferred`). No local HTTP daemon interface exists.
 
-#### Added:
-1. Robust byte-size comparator (`getWallpaperSize`), install-date comparator (`getWallpaperInstallDate`), and rating score comparator (`getWallpaperRatingScore`):
-```javascript
-+ install_date: function (e, t) {
-+   var a = getWallpaperInstallDate(e);
-+   var b = getWallpaperInstallDate(t);
-+   return a === b ? he.name(e, t) : b < a ? -1 : 1;
-+ },
-+ size: function (e, t) {
-+   var a = getWallpaperSize(e);
-+   var b = getWallpaperSize(t);
-+   return a === b ? he.name(e, t) : b < a ? -1 : 1;
-+ },
-+ rating: function (e, t) {
-+   var a = getWallpaperRatingScore(e);
-+   var b = getWallpaperRatingScore(t);
-+   return a === b ? he.name(e, t) : b < a ? -1 : 1;
-+ }
-```
-2. Safe fallback to `.name` if sort key is unrecognized:
-```javascript
-+ ? i.sort(be[W.filter.sort] || be.name)
-+ : i.sort(he[W.filter.sort] || he.name)
-```
+#### WEngine-Plus Implementation:
+* Default trending filter set to weekly: `let me = "trend_week";`.
+* Introduces the global `window.WengineHelper` client communicating with the local Axum HTTP server (`http://127.0.0.1:43196`):
+  ```javascript
+  window.WengineHelper = {
+    url: "http://127.0.0.1:43196",
+    ping: function () { return fetch(this.url + "/api/ping").then(...); },
+    ensureRunning: function () {
+      var workerExe = dir + "\\wengine-helper.exe";
+      window.ui.shellexecute(workerExe, "--daemon");
+      return self.waitForPing(15, 250);
+    },
+    browse: function (params) { return fetch(this.url + "/api/workshop/browse?" + query).then(...); },
+    getItemDetails: function (workshopId) { return fetch(this.url + "/api/workshop/item?id=" + encodeURIComponent(workshopId)).then(...); },
+    getAllMetadata: function () { return fetch(this.url + "/api/metadata/all").then(...); },
+    saveMetadata: function (id, meta) { return fetch(this.url + "/api/metadata/save", ...); },
+    deleteMetadata: function (id) { return fetch(this.url + "/api/metadata/delete", ...); },
+    downloadItem: function (workshopId, title) { return fetch(this.url + "/api/workshop/download", ...); },
+    getDownloadsAll: function () { return fetch(this.url + "/api/workshop/download/all").then(...); },
+    extractItem: function (workshopId, title, file) { return fetch(this.url + "/api/workshop/extract", ...); },
+    getAuthStatus: function () { return fetch(this.url + "/api/auth/status").then(...); },
+    checkUpdate: function (opts) { return fetch(this.url + "/api/update/check", ...).then(...); },
+    startUpdateDownload: function () { return fetch(this.url + "/api/update/download", { method: "POST" }).then(...); },
+    applyUpdate: function () { return fetch(this.url + "/api/update/apply", { method: "POST" }).then(...); },
+    getDotnetStatus: function () { return fetch(this.url + "/api/dotnet/status").then(...); },
+    ensureDotnet: function () { return fetch(this.url + "/api/dotnet/ensure", { method: "POST" }).then(...); },
+    getPluginStatus: function () { return fetch(this.url + "/api/plugins/status").then(...); },
+    startPlugins: function (force) { return fetch(this.url + "/api/plugins/start", ...).then(...); }
+  };
+  ```
+
+---
+
+### 3.3. Metadata Storage & Installed Wallpaper Caching (Steam 429 Prevention)
+* **Location in Source**: Lines ~1860–2050, ~5360–5430.
+* **Diff Classification**: Performance Optimization & Network Bypass.
+
+#### Original Baseline:
+* Selecting an installed wallpaper executed native `l(e)` and dispatched uncached Steam Community scrape requests for metadata, leading to rapid IP rate-limiting (`HTTP 429 Too Many Requests`).
+* Unindexed local projects fell back to generic project objects with misleading `["Everyone", "Local"]` tags.
+
+#### WEngine-Plus Implementation:
+1. **Local Disk Metadata Priority (`W.getMetaForWallpaper`)**:
+   - Reads wallpaper metadata strictly from the local `metadata.json` store (`W.installedMetadata`).
+   - If metadata exists locally, external network requests are bypassed completely:
+     ```javascript
+     var isInstalledMode = W.sourceIsInstalled || !W.sourceIsWorkshop;
+     var curMeta = W.getMetaForWallpaper ? W.getMetaForWallpaper(e) : null;
+     if (curMeta) {
+       for (var sk = 0; sk < safeKeys.length; sk++) {
+         var k = safeKeys[sk];
+         if (curMeta[k] !== undefined && curMeta[k] !== null && curMeta[k] !== "") {
+           e[k] = curMeta[k];
+           if (W.currentSelection) W.currentSelection[k] = curMeta[k];
+         }
+       }
+     }
+     if (!isInstalledMode || !curMeta) {
+       window.WengineHelper.getItemDetails(wid).then(function (det) {
+         if (det && isInstalledMode) {
+           W.installedMetadata[String(wid)] = det;
+           window.WengineHelper.saveMetadata(wid, det);
+         }
+       });
+     }
+     ```
+2. **Tag Cleansing**:
+   - `W.getInstalledMetadataTags` strips the internal `"Local"` tag from rendered tag chips, displaying only genuine Workshop tags.
+
+---
+
+### 3.4. Wallpaper Sorting System Fixes & Custom Comparators
+* **Location in Source**: Lines ~2990–3060, ~3650–3660.
+* **Diff Classification**: Bug Fix & Comparator Extension.
+
+#### Original Baseline:
+* Native comparators threw errors or caused erratic ordering when item file sizes were zero (`filesize === 0`) or title fields were undefined.
+* Supported only basic native properties without awareness of WEngine-Plus metadata fields.
+
+#### WEngine-Plus Implementation:
+1. **Robust Value Extraction Helpers**:
+   - `getWallpaperSize`: resolves numeric byte size across multiple property aliases (`file_size`, `filesize`, `size`).
+   - `getWallpaperInstallDate`: safely parses installation and discovery timestamps.
+   - `getWallpaperRatingScore`: normalizes star ratings and percentage scores.
+2. **Dedicated Comparators**:
+   - Implements safe sorting handlers for `install_date`, `size`, `rating`, `posted_date`, and `updated_date`.
+   - Provides safe fallback to alphabetical sorting by name (`.name`) whenever an unrecognized sort key is encountered:
+     ```javascript
+     ? i.sort(be[W.filter.sort] || be.name)
+     : i.sort(he[W.filter.sort] || he.name)
+     ```
 
 ---
 
 ### 3.5. Workshop Query Interception & 50-Item Pagination
-* **Location**: Lines ~9660–9900.
-* **Diff Type**: **Modified & Overridden**
+* **Location in Source**: Lines ~9660–9900.
+* **Diff Classification**: Network Layer Redirection & Pagination Overhaul.
 
-#### Removed:
-1. Native Steam Workshop query loop that relied on CEF backend `j.callDeferred("queryWorkshop")`:
-```javascript
-- if (!xa.cancel)
--   j.callDeferred("queryWorkshop", ...);
-```
-2. Redundant Steam backup error modal prompt:
-```javascript
-- function pa(t) {
--   O(["ui_browse_no_service_body", "ui_browse_no_service_body_use_backup"]);
-- }
-```
+#### Original Baseline:
+* Dispatches search queries via native CEF `j.callDeferred("queryWorkshop")`, restricted to Steam's default 30 items per page.
+* False network drops trigger `pa(t)`, opening a modal stating "Steam servers are offline".
 
-#### Added:
-1. Interception to route search queries through `WengineHelper.browse(i)`:
-```javascript
-+ if (!xa.cancel) {
-+   if (window.WengineHelper) {
-+     return window.WengineHelper.browse(i).then(function (res) {
-+       if (res && res.wallpapers) {
-+         // Populate pagination metadata (50 items per page)
-+         W.pagination.total = res.total_matching || 0;
-+         W.pagination.pages = res.total_pages || 1;
-+         W.sortedWallpapers = res.wallpapers;
-+         W.queryActive = false;
-+         ...
-+       }
-+     });
-+   }
-+ }
-```
-2. Clean empty function stub for `pa(t)` to prevent false "Steam servers offline" banners:
-```javascript
-+ function pa(t) {}
-```
+#### WEngine-Plus Implementation:
+1. **Browse Query Redirection**:
+   - Intercepts query dispatching and routes requests through `window.WengineHelper.browse(i)`.
+   - Populates pagination controls with 50 items per page:
+     ```javascript
+     if (!xa.cancel && window.WengineHelper) {
+       return window.WengineHelper.browse(i).then(function (res) {
+         if (res && res.wallpapers) {
+           W.pagination.total = res.total_matching || 0;
+           W.pagination.pages = res.total_pages || 1;
+           W.sortedWallpapers = res.wallpapers;
+           W.queryActive = false;
+         }
+       });
+     }
+     ```
+2. **Offline Modal Suppression**:
+   - Function `pa(t)` is neutralized into an empty stub to prevent false-positive offline error popups during local proxying.
 
 ---
 
-### 3.6. Independent Source Filters, Reset & Author Filtering
-* **Location**: `scripts.js`, `createFilterHelper`, the incompatible-items watcher, author-label resolution, `callbackResetFilter`, `callbackClearAuthorFilter`, and the source-switch handler.
-* **Diff Type**: **Added & Enhanced**
+### 3.6. Independent Filter States & Visibility (Workshop vs. Installed)
+* **Location in Source**: Lines ~1380–1450, ~8330–8350, ~9680–9750, ~10410–10430.
+* **Diff Classification**: State Management Isolation.
 
-#### Current Behavior:
-1. **Independent helper state for Installed and Workshop**: `createFilterHelper()` creates defaults for category, type, resolution, age rating, asset type/genre, script type, the incompatible flag, and included/excluded miscellaneous and genre tags. Each call creates fresh arrays, avoiding shared tag state:
-```javascript
-W.filterHelperBySource = {
-  installed: createFilterHelper(),
-  workshop: createFilterHelper()
-};
-W.filterHelper = W.filterHelperBySource.installed;
-```
-The source-switch handler selects the corresponding object as `W.filterHelper`. Switching between Installed and Workshop preserves each view's helper-filter selections rather than reusing one shared object. This is in-memory state, not persistence across application restarts.
+#### Original Baseline:
+* A single filter object governed all views. Opening or closing the filter drawer in one tab persisted across all other tabs, and resetting filters indiscriminately purged cross-source state.
 
-2. **Source-aware reset**: `callbackResetFilter()` returns immediately outside Installed and Workshop. In a supported view, it replaces only that source's helper object with fresh defaults, clears the active search text, and clears only the relevant author/preset fields:
-```javascript
-var t, e, sourceKey = W.sourceIsWorkshop ? "workshop" : "installed";
-if (!W.sourceIsWorkshop && !W.sourceIsInstalled) return;
-W.filterHelperBySource[sourceKey] = createFilterHelper();
-W.filterHelper = W.filterHelperBySource[sourceKey];
-if (W.filter) W.filter.text = "";
-if (W.sourceIsWorkshop) {
-  if (W.filterAuthor) delete W.filterAuthor.authorSteamId;
-  if (W.filterPreset) delete W.filterPreset.workshopid;
-} else if (W.sourceIsInstalled && W.filterAuthor) {
-  delete W.filterAuthor.installedAuthor;
-}
-```
-The existing native filter-reset and refresh logic follows this source-specific cleanup.
-
-3. **Author-filter isolation**: Installed author filtering stores `W.filterAuthor.installedAuthor` and refreshes the local list with `z()`. Switching sources no longer deletes either author field. Workshop author names/Steam IDs are displayed only while `W.sourceIsWorkshop` is true. Clearing an author filter removes only the active source's field:
-```javascript
-if (W.sourceIsInstalled) {
-  delete W.filterAuthor.installedAuthor;
-  z();
-} else {
-  delete W.filterAuthor.authorSteamId;
-  P();
-}
-```
-
-4. **Source-aware incompatible-items watcher**: The watcher observes both the source and incompatible flag. It invokes `onFilterChange()` only when the flag changes while the source remains unchanged, avoiding a redundant filter-change callback when switching sources with different saved flag values:
-```javascript
-W.$watchGroup(["source", "filterHelper.incompatible"], function (newVal, oldVal) {
-  if (newVal[0] === oldVal[0] && newVal[1] !== oldVal[1]) {
-    W.onFilterChange();
-  }
-});
-```
+#### WEngine-Plus Implementation:
+1. **Per-Source Filter Models**:
+   - Maintains separate filter configurations for Workshop and Installed:
+     ```javascript
+     W.filterHelperBySource = {
+       installed: createFilterHelper(),
+       workshop: createFilterHelper()
+     };
+     W.filterHelper = W.filterHelperBySource.installed;
+     ```
+   - Each helper tracks category, type, resolution, age rating, assets (type, genre, script), incompatible items flag, and included/excluded tags independently.
+2. **Per-Source Filter Drawer Visibility**:
+   - Drawer visibility state is tracked independently per source:
+     ```javascript
+     W.showFilterBySource = { installed: !1, workshop: !1 };
+     W.$watch("showFilter.visible", function (val) {
+       if (W.showFilterBySource) {
+         if (W.sourceIsWorkshop) W.showFilterBySource.workshop = !!val;
+         else if (W.sourceIsInstalled) W.showFilterBySource.installed = !!val;
+       }
+     });
+     ```
+   - In `W.setListSource`, the current tab's visibility is saved before switching sources, and the target tab's visibility is restored upon arrival:
+     ```javascript
+     W.showFilter.visible = W.sourceIsWorkshop
+       ? !!W.showFilterBySource.workshop
+       : W.sourceIsInstalled
+         ? !!W.showFilterBySource.installed
+         : !1;
+     ```
+3. **Source-Aware Reset & Author Isolation**:
+   - `callbackResetFilter` resets only the active source's filter helper and search text.
+   - Author filters (`filterAuthor.installedAuthor` for Installed, `filterAuthor.authorSteamId` for Workshop) operate in isolation and do not clear each other during tab switches.
 
 ---
 
-### 3.7. Thumbnail Directive & Status Badges
-* **Location**: Lines ~28936–29100.
-* **Diff Type**: **Modified**
+### 3.7. Comprehensive Status Banners
+* **Location in Source**: Lines ~2280–2370, ~2460–2520, template `views/views/browsewallpapers.html` (lines ~39545–39560).
+* **Diff Classification**: UI Status & Asynchronous Feedback.
 
-#### Removed:
-- Generic disk icon (`fa-save`) for installed items:
-```javascript
-- <span class="fas fa-save statusIconInstalled wallpaperStatusIcon galleryTooltipInstalled"></span>
-```
+#### Original Baseline:
+* No UI indicators exist for daemon health, background Steam authentication, or plugin and runtime dependency downloads.
 
-#### Added:
-- Clean checkmark badge (`fa-check-circle`) for installed status:
-```javascript
-+ <span class="fas fa-check-circle statusIconInstalled wallpaperStatusIcon galleryTooltipInstalled"></span>
-```
-- Accurate installed status detection combining disk files, active downloads, and WEngine Helper database:
-```javascript
-+ "installed" !== m.wtTag &&
-+ (t.ctx.wallpaper.status === "installed" ||
-+   (window.WengineHelper && window.WengineHelper.isWallpaperInstalled &&
-+     window.WengineHelper.isWallpaperInstalled(t.ctx.wallpaper)))
-```
+#### WEngine-Plus Implementation:
+1. **Daemon Startup & Steam Authentication Alert**:
+   - `W.serviceStartupStatus` verifies local daemon connectivity on launch via `ensureRunning()`.
+   - Polls `/api/auth/status`: displays a spinner with *"Log in to Steam..."* during active credential handshakes (`is_logging_in`), transitions to a greeting banner with persona name on success, and auto-dismisses smoothly.
+2. **Plugin & .NET Runtime Progress Banner**:
+   - Rendered across both Workshop and Installed tabs:
+     ```html
+     ng-if="(sourceIsWorkshop || sourceIsInstalled) && pluginStatus && (pluginStatus.is_downloading || !pluginsReady || pluginStatus.error)"
+     ```
+   - Differentiates runtime downloads (`Downloading runtime: .NET Runtime (X%)...`) from plugin component downloads.
+   - Automatically polls at 400ms intervals during active downloads, providing smooth progress updates, and includes an interactive `Retry` button upon failure.
 
 ---
 
-### 3.8. Steam Authentication Modal Controller (`SteamLoginModalCtrl`)
-* **Location**: Lines ~25450–25910.
-* **Diff Type**: **Added**
+### 3.8. Wallpaper Deletion & Desktop Wallpaper Protection
+* **Location in Source**: Lines ~1500–2130, ~3500–3550, ~6680, ~6857.
+* **Diff Classification**: Data Protection & File Lock Safety.
 
-#### Removed:
-None.
+#### Original Baseline:
+* No validation checked whether a wallpaper scheduled for deletion was actively running on the Windows desktop. Attempting deletion while previewed resulted in file lock errors (`ERROR_SHARING_VIOLATION`).
 
-#### Added:
-Full AngularJS controller managing the Steam account switcher and mobile QR login modal:
-```javascript
-+ angular.module("wallpaperbrowserApp").controller("SteamLoginModalCtrl", [
-+   "$scope", "$uibModalInstance", "$interval", "$timeout",
-+   function ($scope, $uibModalInstance, $interval, $timeout) {
-+     $scope.tab = "accounts";
-+     $scope.accounts = [];
-+     $scope.qrStatus = "idle";
-+     $scope.qrSvg = "";
-+     $scope.startQrLogin = function() { ... };
-+     $scope.pollQrStatus = function() { ... };
-+     $scope.selectAccount = function(index) { ... };
-+     $scope.addAccount = function() { ... };
-+     $scope.removeAccount = function(user) { ... };
-+     ...
-+   }
-+ ]);
-```
+#### WEngine-Plus Implementation:
+1. **Desktop-Applied vs. UI-Previewed Distinction**:
+   - `W._trulyAppliedWallpapers` tracks wallpapers genuinely applied to monitors in Windows settings, differentiating them from temporary preview selections in the UI.
+   - `isWallpaperTrulyApplied` validates items strictly against applied monitor assignments.
+2. **Active Wallpaper Protection**:
+   - Attempting to delete an active desktop wallpaper is blocked and displays an explanatory prompt: *"To delete active wallpaper, please apply another wallpaper first."*.
+3. **Two-Tier Preview Reversion & Handle Release**:
+   - If an unapplied wallpaper is deleted while currently previewed, the monitor preview is immediately reverted to the applied wallpaper or cleared.
+   - Introduces a 250ms asynchronous yield prior to calling HTTP deletion, granting CEF and the worker process (`wallpaper64.exe`) sufficient time to release file handles (`CloseHandle`).
 
 ---
 
-### 3.9. HTML Templates & Layout Modifications (`$templateCache`)
-* **Location**: Lines ~39670–39945.
-* **Diff Type**: **Modified**
+### 3.9. Steam Authentication Modal Controller (`SteamLoginModalCtrl`)
+* **Location in Source**: Lines ~25450–25910.
+* **Diff Classification**: Controller Addition (Authentication).
 
-#### Modified Templates:
+#### Original Baseline:
+* Relied entirely on native Steam client integration; no in-app account management or QR authentication existed.
 
-1. **`views/views/browsewallpapers.html`**:
-   - **Filter Drawer**: Added dedicated `<div class="helperFilterContainer">` with Droplists for Category, Type, Resolution, and Age Rating.
-   - **Asset & Scripts Accordion**: Added collapsible section for Asset Type, Asset Genre, and Script Type filters.
-   - **Incompatible Items Checkbox**: Added special filter toggle checkbox bound to `filterHelper.incompatible`.
-   - **Interactive Tag Chips**: Added `miscTagsList` and `genreTagsList` button loops with 3-state styling (`.btn-default`, `.btn-success`, `.btn-danger`).
-   - **Pagination Bar**: Added bottom pagination navigation (`<div class="browseWallpaperPagination">`) with `<<`, `>>`, and numbered page buttons.
-   - **Workshop Metadata Section**: Added details box displaying Author link, File Size, Star Rating, Posted Date, Updated Date, and category tag pills.
-   - **Extraction Progress Toast**: Added floating notification pill (`extractStatusNotice`) showing real-time unpacking progress and spinner.
-   - **Service Startup & Auth Status Alert**: Added dismissable top banner `<div class="browseAlert" ng-if="serviceStartupStatus && serviceStartupStatus.visible">` displaying daemon startup feedback, in-flight Steam authentication status, and user persona greeting upon successful login.
-   - **Plugin Status Alert**: Added top banner for plugin downloading and initialization progress.
-
-2. **`views/modals/steamloginmodal.html`**:
-   - Added complete modal HTML for account list, QR code image display, and cookie login input.
-
-3. **`views/templates/workshopratingstars.html`**:
-   - Overhauled rating stars layout with inline flex alignment and gold star styling.
+#### WEngine-Plus Implementation:
+* Implements the `SteamLoginModalCtrl` AngularJS controller managing:
+  - Saved accounts list with one-click switching.
+  - Asynchronous Steam QR code generation and status polling (`/api/auth/qr/status`).
+  - Manual Steam Guard session cookie input fallback.
 
 ---
 
-### 3.10. Service Startup Status & Steam Authorization Feedback
-* **Location**: Lines ~2283–2361 in `browseWallpapersCtrl` and template `views/views/browsewallpapers.html`.
-* **Diff Type**: **Added**
+### 3.10. Thumbnail Directive & Badges
+* **Location in Source**: Lines ~28936–29100.
+* **Diff Classification**: UI Enhancement.
 
-#### Removed:
-None.
+#### Original Baseline:
+* Displayed a generic floppy disk icon (`fa-save`) on installed items.
+* Relied solely on `item.status === 'installed'`.
 
-#### Added:
-1. Reactive `$scope.serviceStartupStatus` model with automatic health-checking and auth polling on UI boot (`W.initServiceStartupCheck`):
-```javascript
-+ W.serviceStartupStatus = {
-+   visible: true,
-+   type: "info",
-+   icon: "fa-spinner fa-spin",
-+   text: "Launching the WEngine Helper service...",
-+ };
-+ W.initServiceStartupCheck = function () {
-+   if (!window.WengineHelper) {
-+     W.serviceStartupStatus.visible = false;
-+     return;
-+   }
-+   window.WengineHelper.ensureRunning().then(function (alive) {
-+     if (!alive) {
-+       m(function () {
-+         W.serviceStartupStatus.type = "warning";
-+         W.serviceStartupStatus.icon = "fa-exclamation-triangle";
-+         W.serviceStartupStatus.text = "The WEngine Helper service could not be started";
-+         m(function () { W.serviceStartupStatus.visible = false; }, 4000);
-+       });
-+       return;
-+     }
-+     var checkAuthAttempts = 0;
-+     var maxAttempts = 20;
-+     function pollAuth() {
-+       window.WengineHelper.getAuthStatus().then(function (auth) {
-+         m(function () {
-+           if (auth && auth.logged_in) {
-+             var name = auth.persona_name ? (" (" + auth.persona_name + ")") : "";
-+             W.serviceStartupStatus.type = "success";
-+             W.serviceStartupStatus.icon = "fa-check-circle";
-+             W.serviceStartupStatus.text = "The service has been launched. You have successfully logged into Steam." + name;
-+             W.refreshPluginData();
-+             m(function () { W.serviceStartupStatus.visible = false; }, 1500);
-+           } else if (auth && auth.is_logging_in) {
-+             W.serviceStartupStatus.type = "info";
-+             W.serviceStartupStatus.icon = "fa-spinner fa-spin";
-+             W.serviceStartupStatus.text = "The service has been launched. Log in to Steam...";
-+             if (++checkAuthAttempts < maxAttempts) {
-+               setTimeout(pollAuth, 500);
-+             } else {
-+               W.serviceStartupStatus.type = "success";
-+               W.serviceStartupStatus.icon = "fa-check-circle";
-+               W.serviceStartupStatus.text = "The WEngine Helper service has been started";
-+               m(function () { W.serviceStartupStatus.visible = false; }, 1500);
-+             }
-+           } else {
-+             if (checkAuthAttempts < 3) {
-+               checkAuthAttempts++;
-+               setTimeout(pollAuth, 500);
-+             } else {
-+               W.serviceStartupStatus.type = "success";
-+               W.serviceStartupStatus.icon = "fa-check-circle";
-+               W.serviceStartupStatus.text = "The WEngine Helper service has been started";
-+               m(function () { W.serviceStartupStatus.visible = false; }, 1500);
-+             }
-+           }
-+         });
-+       }).catch(function () {
-+         m(function () { W.serviceStartupStatus.visible = false; });
-+       });
-+     }
-+     pollAuth();
-+   });
-+ };
-+ W.initServiceStartupCheck();
-```
-2. Dismissable status banner placed directly at the top of the browse wallpaper view in `$templateCache`:
-```html
-+ <div class="browseAlert" ng-if="serviceStartupStatus && serviceStartupStatus.visible">
-+   <uib-alert type="{{serviceStartupStatus.type || 'info'}}" close="serviceStartupStatus.visible=false">
-+     <div style="display:flex;align-items:center;justify-content:space-between;">
-+       <div style="display:flex;align-items:center;">
-+         <span class="fas" ng-class="serviceStartupStatus.icon || 'fa-spinner fa-spin'" style="margin-right:8px;"></span>
-+         <span>{{serviceStartupStatus.text}}</span>
-+       </div>
-+     </div>
-+   </uib-alert>
-+ </div>
-```
+#### WEngine-Plus Implementation:
+* Replaces the disk icon with a green checkmark badge (`fa-check-circle`).
+* Identifies installed status through multi-source validation: disk directory matching, active download verification, and helper database state (`WengineHelper.isWallpaperInstalled`).
 
 ---
 
-### 3.11. Backend: In-Flight Steam Authorization Tracking (`src/auth/auth.rs`)
-* **Location**: `src/auth/auth.rs` lines ~27, 51, 68, 74, 340–357.
-* **Diff Type**: **Modified & Enhanced**
+### 3.11. HTML Template Modifications (`$templateCache`)
+* **Location in Source**: Lines ~39515–39560.
+* **Diff Classification**: Template Cache Overhaul.
 
-#### Removed:
-None.
-
-#### Added:
-1. `is_logging_in: bool` field added to the serialized `AuthStatus` DTO:
-```rust
-+ #[derive(Debug, Clone, Serialize)]
-+ pub struct AuthStatus {
-+     pub logged_in: bool,
-+     pub is_logging_in: bool,
-+     pub steamid: Option<String>,
-+     pub persona_name: Option<String>,
-+     pub avatar_url: Option<String>,
-+ }
-```
-2. Thread-safe atomic flag in `AuthManager` tracking ongoing asynchronous credential logins:
-```rust
-+ pub struct AuthManager {
-+     session: Arc<RwLock<Option<AuthSession>>>,
-+     storage_path: PathBuf,
-+     is_logging_in: Arc<AtomicBool>,
-+ }
-+ 
-+ impl AuthManager {
-+     pub fn get_status(&self) -> AuthStatus {
-+         let is_logging_in = self.is_logging_in.load(Ordering::SeqCst);
-+         ...
-+     }
-+ 
-+     pub async fn login_credentials(&self, username: &str, password: &str) -> anyhow::Result<AuthStatus> {
-+         self.is_logging_in.store(true, Ordering::SeqCst);
-+         let res = self.login_credentials_inner(username, password).await;
-+         self.is_logging_in.store(false, Ordering::SeqCst);
-+         res
-+     }
-+ }
-```
-3. Real-time handshake status exposed to the UI over `GET /api/auth/status`, enabling the frontend banner to differentiate between an idle state and an ongoing Steam RSA cryptographic handshake/login.
-
----
-
-### 3.12. Wallpaper Deletion & Active Wallpaper Protection System
-* **Location**: `scripts.js` (lines ~1500–2130, 3500–3550, 6680, 6857, 7738) & `src/main.rs` (`clean_readonly_and_remove`, `clean_readonly_and_remove_step`, `handle_workshop_delete`).
-* **Diff Type**: **Refactored / Added**
-
-#### Core Architecture & Mechanics:
-1. **Separation of Truly Applied vs. Previewed Wallpapers**:
-   - Wallpaper Engine locks wallpaper files in the desktop worker process (`wallpaper64.exe`) only when wallpapers are confirmed and applied to the desktop.
-   - When browsing/selecting wallpapers in the UI, Wallpaper Engine runs a temporary preview on monitor(s) via `browseWallpaperObject.selectWallpaper`.
-   - `W._trulyAppliedWallpapers` tracks the persisted configuration loaded at start (`applyMonitorConfigurationAndWallpaperConfig`) and updated upon user confirmation (`W.callbackOk`).
-2. **Truly Applied Check (`isWallpaperTrulyApplied`)**:
-   - Checks target items strictly against `W._trulyAppliedWallpapers` (and screensaver configurations).
-   - Temporary UI selections and previewed wallpapers do not trigger false positive active detections.
-3. **Preview Reversion & Two-Tier Handle Release**:
-   - If an unapplied wallpaper is deleted while currently active in UI preview/selection:
-     - The monitor preview is restored to the truly applied wallpaper (`_trulyAppliedWallpapers[location]`) or cleared (`clearWorkerWindow` / `removeWallpaper`).
-     - `W.currentSelection` is cleared/reset, releasing the temporary preview file lock in Wallpaper Engine CEF/engine before disk deletion.
-     - **Frontend IPC Yield**: If the target wallpaper was in preview (`wasInPreview` / `anyReverted`), frontend yields 250ms (`setTimeout(..., 250)`) before issuing `deleteWallpaper` over HTTP. This gives CEF IPC and Wallpaper Engine's worker process (`wallpaper64.exe` / mpv / CEF) adequate time to process window clearing and release underlying file handles (`CloseHandle`).
-4. **Backend Resilient Async Cleanup (`clean_readonly_and_remove`)**:
-   - Replaced aggressive process killing with an asynchronous retry loop in Rust (`tokio::time::sleep(100ms)` up to a 2000ms timeout).
-   - In each step (`clean_readonly_and_remove_step`), clears Windows read-only file/folder permissions and deletes unlocked files.
-   - Gracefully absorbs transient Windows file-locking race conditions (`ERROR_SHARING_VIOLATION`) from media decoders or background scanners without failing prematurely with `ERROR_DIR_NOT_EMPTY`.
-   - Cleans across `myprojects`, `defaultprojects`, and `workshop/content/431960`, and purges download/extract/metadata state caches.
-5. **Active Wallpaper Notification**:
-   - Single item deletion: if truly applied, deletion is blocked and an alert modal is presented: *"To delete active wallpaper, please apply another wallpaper first."* with an `OK` button.
-   - Multi-selection deletion: partitions items into inactive and active. Inactive items are deleted from disk and UI; active items remain in `W.multiSelection` and trigger the alert: *"To delete active wallpapers, please apply other wallpapers first."*.
-
----
-
-### 3.13. GitHub Auto-Update, Version Display & Silent Self-Patcher System
-* **Location**: `src/services/update.rs`, `src/setup.rs` (`run_silent_patch_mode`), `src/main.rs`, and `scripts.js` (`BrowseWallpapersCtrl`, `window.WengineHelper`, `views/views/browsewallpapers.html`).
-* **Diff Type**: **Added & Integrated**
-
-#### Architecture & Mechanics:
-1. **Startup GitHub Release Check**:
-   - On daemon launch, `UpdateManager` automatically checks `https://api.github.com/repos/psyattack/WEngine-Plus/releases/latest` asynchronously via `reqwest` with user agent `WEngine-Plus/<version>`.
-   - Compares semver (`major.minor.patch`) to detect newer releases.
-   - Extracts release notes and the `wengine-helper.exe` binary asset download URL.
-   - Results are cached in memory (5-minute TTL) with an optional `?force=true` query param for manual re-checks.
-2. **UI Version Display & Update State**:
-   - Current program version (`WEngine+ v1.2.0`) is seamlessly integrated into the footer (`browseWallpaperFooterControls .center`), positioned symmetrically between the left Editor buttons and right OK/Cancel buttons.
-   - Blends with the UI skin (`opacity: 0.65`, system font), clicking it triggers an instant update check (or Shift+Click for instant local mock test).
-   - When an update is detected, displays a clean badge: `New version <ver> available` and an `Update` button (`btn-xs btn-success`), styled with identical matching heights (`22px`), box-sizing, and font sizes.
-   - During download, dynamically renders live progress (`Downloading... X%`) with an animated spinner, matching the action button dimensions.
-   - Handles network failures gracefully with error tooltips and a `Retry` action.
-3. **Chunked Streaming Download & Validation**:
-   - Downloads binary chunk-by-chunk to `<scripts>/wengine-helper.exe.update` while reporting percentage progress to the frontend over `/api/update/status`.
-   - Validates that the downloaded binary is not empty/corrupted (size > 1 MB and begins with the PE executable signature `MZ`).
-4. **Three-Phase Self-Replacement, Silent Patching & Reopening**:
-   - **Phase 1: GUI Closure**: When the user initiates update application (`POST /api/update/apply`), `LifecycleManager` sets `IS_UPDATING = true` to protect the process from premature watcher termination. The frontend receives confirmation and calls `window.ui.close()`, gracefully closing CEF.
-   - **Phase 2: Silent Script Patching & Binary Replacement**:
-     - Running binary renames itself to `wengine-helper.exe.old` and moves `wengine-helper.exe.update` to `wengine-helper.exe`.
-     - Spawns the new binary with `--silent-patch-script --old-pid <pid> --old-exe <path>`.
-     - The new binary waits for the old daemon PID to exit, waits for `wallpaperui.exe` to close completely, and reliably deletes `.old` with a 30-attempt retry loop and detached PowerShell fallback.
-     - Overwrites `scripts.js` with its new embedded `SCRIPTS_CONTENT` (after creating safety backup `scripts.js.bak`).
-     - Launches `wengine-helper.exe --daemon` in the background with `CREATE_NO_WINDOW`.
-   - **Phase 3: GUI Auto-Reopen**:
-     - The new binary locates `wallpaper64.exe` (or `wallpaper32.exe`) via comprehensive registry, process, and disk auto-discovery (`find_wallpaper_engine_dir`).
-     - Executes `wallpaper64.exe` as a normal GUI application (without `CREATE_NO_WINDOW`, which previously suppressed CEF window creation), with a PowerShell `Start-Process` fallback.
-     - Wallpaper Engine signals the running instance to immediately display the freshly updated CEF GUI browser.
-     - The updated GUI loads the new `scripts.js` with zero manual user intervention.
-5. **Pre-Initialization Reliability & Zero-Config Mock Testing**:
-   - `checkUpdate()` and `initUpdateCheck()` await `ensureRunning()` before dispatching HTTP requests to avoid early `ERR_CONNECTION_REFUSED` errors.
-   - Polling fallback handles asynchronous background update checks without requiring manual clicks.
-   - Built-in zero-config mock endpoints (`/api/update/mock/release` & `/api/update/mock/binary`) enable instant testing of the complete update pipeline without pushing releases to GitHub. Shift+Click on the version string in the UI triggers a mock update instantly.
-
----
-
-
-## 4. Summary of Removed / Deprecated Elements
-
-| Component / Code | Reason for Removal / Deprecation |
+| Template Key | WEngine-Plus Extensions |
 | :--- | :--- |
-| **Shared helper-filter state and cross-source author cleanup** | Replaced a single helper object with per-source state; source switches no longer delete author filters, and reset/clear operations target the active source. |
-| **`localStorage` metadata cache** | Removed to eliminate desynchronization and resurrecting deleted wallpapers. All metadata is strictly read from `scripts/metadata.json`. |
-| **Premature `saveMetadata` calls** | Removed calls in `callbackWallpaperSelected`, `startWorkshopDownload`, and `subscribeWorkshopItem` so unfinished downloads are not recorded in metadata. |
-| **Local project fallback in `getMetaForWallpaper`** | Removed returning `w` when metadata was absent. Prevented display of misleading `["Everyone", "Local"]` tags on installed items. |
-| **Native `j.callDeferred("queryWorkshop")`** | Bypassed in favor of the local daemon API `/api/workshop/browse` to support 50 items/page, SSR pagination, and preloading. |
-| **Native Steam offline error modal (`pa`)** | Suppressed to allow WEngine Helper's offline caching and proxying to work smoothly without popup interruptions. |
-| **Active wallpaper deletion crutches (force killing processes & monitor force-resetting)** | Removed unstable engine-bypassing hacks. Inactive wallpapers are deleted directly and cleanly with preview handle yielding and async retry backoff; active wallpapers are protected from deletion and prompt the user to apply another wallpaper first. |
+| **`views/templates/titlebar.html`** | Embeds version badge directly below the window title with update triggers; aligns Z-layer with `.titlebar .title`. |
+| **`views/views/browsewallpapers.html`** | Embeds helper filter drawer (`helperFilterContainer`); 3-state tag chips (`miscTagsList`, `genreTagsList`); bottom pagination bar; metadata display panel; extraction progress toast (`extractStatusNotice`); startup alert; and dual-tab plugin/.NET download banner. |
+| **`views/modals/steamloginmodal.html`** | Provides full markup for account selection, Steam mobile QR rendering, and cookie authentication dialogs. |
+| **`views/templates/workshopratingstars.html`** | Inline-flex star layout, styled star icons, and precise percentage rating label. |
+
+---
+
+## 4. Modified Components Summary
+
+| Subsystem / Hook | Modification Type | Purpose in `scripts.js` |
+| :--- | :--- | :--- |
+| **`titlebar` & `localeLoader`** | Extension | Strips `- Steam Edition`, centers version indicator, aligns Z-layer. |
+| **`window.WengineHelper`** | Addition | Async HTTP/IPC bridge to background daemon (:43196). |
+| **`W.getMetaForWallpaper`** | Optimization | Prioritizes `metadata.json` to prevent Steam HTTP 429 rate limits. |
+| **Sorting Comparators** | Bug Fix | Safe extraction for zero-size files; custom date/size/rating sorters. |
+| **`queryWorkshop` Interception** | Redirection | Routes queries to local daemon proxy; enforces 50 items/page. |
+| **`filterHelperBySource`** | Isolation | Separates filter models and drawer visibility between tabs. |
+| **`serviceStartupStatus`** | Addition | UI banner for daemon initialization and Steam authentication status. |
+| **`pluginStatus` Banner** | Extension | Displays .NET Runtime and plugin download progress on both tabs. |
+| **`isWallpaperTrulyApplied`** | Safety | Protects active desktop wallpapers from premature deletion. |
+| **`SteamLoginModalCtrl`** | Addition | Controller for in-app Steam QR and cookie authentication modal. |
+| **`$templateCache`** | Template Edit | Inlines all new UI controls directly into AngularJS templates. |

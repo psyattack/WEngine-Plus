@@ -339,18 +339,12 @@ impl UpdateManager {
                     return;
                 }
 
-                // 2. Spawn new binary with --silent-patch-script
+                // 2. Spawn new binary with --silent
                 #[cfg(windows)]
                 {
                     use std::os::windows::process::CommandExt;
                     let mut cmd = std::process::Command::new(&target_exe);
-                    cmd.args([
-                        "--silent-patch-script",
-                        "--old-pid",
-                        &my_pid.to_string(),
-                        "--old-exe",
-                        &old_exe.to_string_lossy(),
-                    ]);
+                    cmd.arg("--silent");
                     cmd.current_dir(&scripts_dir);
                     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW for background helper
                     let _ = cmd.spawn();
@@ -358,13 +352,7 @@ impl UpdateManager {
                 #[cfg(not(windows))]
                 {
                     let _ = std::process::Command::new(&target_exe)
-                        .args([
-                            "--silent-patch-script",
-                            "--old-pid",
-                            &my_pid.to_string(),
-                            "--old-exe",
-                            &old_exe.to_string_lossy(),
-                        ])
+                        .arg("--silent")
                         .current_dir(&scripts_dir)
                         .spawn();
                 }
@@ -389,11 +377,11 @@ impl UpdateManager {
                                 [System.IO.File]::Delete('{}'); \
                                 [System.IO.File]::Move('{}', '{}'); \
                                 [System.IO.File]::Move('{}', '{}'); \
-                                Start-Process -FilePath '{}' -ArgumentList '--silent-patch-script --old-pid {} --old-exe \"{}\"' -WorkingDirectory '{}'; \
+                                Start-Process -FilePath '{}' -ArgumentList '--silent' -WorkingDirectory '{}'; \
                                 break; \
                             }} catch {{}} \
                         }}",
-                        pid, escaped_old, escaped_target, escaped_old, escaped_update, escaped_target, escaped_target, pid, escaped_old, escaped_scripts
+                        pid, escaped_old, escaped_target, escaped_old, escaped_update, escaped_target, escaped_target, escaped_scripts
                     );
 
                     let mut cmd = std::process::Command::new("powershell");
