@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.0.0](https://github.com/psyattack/WEngine-Plus/compare/v1.4.0...v2.0.0) - 2026-11-25
+
+### Added
+- Russian and Simplified Chinese translations for the WEngine-Plus interface, following Wallpaper Engine's language setting; English remains the fallback.
+- `--uninstall` (`-u`) removes the overlay loader, restores the original frontend and deletes the helper's token, metadata, sessions, accounts, logs, plugins and portable runtime.
+- A rotating `wengine-helper.log` in the scripts directory, so startup, update and download problems can be diagnosed without a console.
+- An application icon and version information on `wengine-helper.exe`.
+
+### Changed
+- The frontend patch is now one loader line appended to Wallpaper Engine's pristine `scripts.js` plus the separate `wengine-plus.js` overlay. The stock frontend is no longer replaced with a modified copy, so the patch is smaller and uninstalling restores the original UI. The overlay provides the Workshop browser, filters, Steam sign-in, download accounts, downloads, extraction and the update widget.
+- The local helper API now requires the per-install `X-Wengine-Client` token, rejects unexpected browser origins and confines file operations to the Wallpaper Engine folder and known workshop wallpaper folders.
+- Starting the helper again now exits quietly when a healthy instance already owns the port and reports a conflict when another application owns it, instead of competing for the same state.
+- The installer refuses to patch a frontend that is neither pristine nor backed up, instead of overwriting it.
+- The documentation was rewritten: English, Russian and Chinese READMEs, plus an FAQ, API reference, architecture guide and contribution and security notes.
+- Compatibility: developed and tested against Wallpaper Engine 2.8.42. Other versions will most likely work, but they are not guaranteed; open an issue with your `version.json` if something breaks.
+
+### Fixed
+- `metadata.json` is now written to a temporary file and renamed, so a failed or interrupted write no longer truncates the offline wallpaper database.
+
+<details><summary>Detailed Changelog</summary>
+
+### Added
+- global update 2.0 (by @psyattack in b73eb0f)
+
+</details>
+
+
 ## [1.4.0](https://github.com/psyattack/WEngine-Plus/compare/v1.3.0...v1.4.0) - 2026-10-15
 
 ### Added
