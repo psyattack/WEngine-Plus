@@ -1,8 +1,10 @@
 //! .NET Runtime management for DepotDownloaderMod and RePKG plugins.
 //!
-//! Checks if .NET 8/9/10 is installed in the system. If not found, downloads
-//! the portable .NET 9.0.17 runtime, extracts it to the directory alongside
-//! the script (`dotnet/`), and sets DOTNET_ROOT environment variable.
+//! Checks if a compatible .NET runtime is installed in the system. Any
+//! `Microsoft.NETCore.App` major version from 8 up is accepted because newer
+//! runtimes are backwards compatible with the tools the helper runs. If none is
+//! found, it downloads the portable .NET 9.0.17 runtime, extracts it to the
+//! directory alongside the script (`dotnet/`), and sets DOTNET_ROOT.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +17,13 @@ use serde::Serialize;
 pub const DOTNET_RUNTIME_URL: &str =
     "https://builds.dotnet.microsoft.com/dotnet/Runtime/9.0.17/dotnet-runtime-9.0.17-win-x64.zip";
 pub const DOTNET_RUNTIME_VERSION: &str = "9.0.17";
+
+/// Lowest `Microsoft.NETCore.App` major version the helper can run on. Newer majors are
+/// backwards compatible for DepotDownloaderMod and RePKG, so they count as installed too.
+pub const MIN_SYSTEM_DOTNET_MAJOR: u32 = 8;
+
+/// Progress callback used while downloading/extracting the runtime.
+pub type ProgressCallback = Arc<dyn Fn(f32, &str) + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DotnetStatus {
@@ -37,10 +46,11 @@ pub struct DotnetManager {
     base_dir: PathBuf,
     status: Arc<RwLock<DotnetStatus>>,
     is_working: Arc<AtomicBool>,
+    http: reqwest::Client,
 }
 
 impl DotnetManager {
-    pub fn new(base_dir: PathBuf) -> Self {
+    pub fn new(base_dir: PathBuf, http: reqwest::Client) -> Self {
         let is_sys = is_system_dotnet_installed();
         let dotnet_dir = base_dir.join("dotnet");
         let is_port = is_portable_runtime_valid(&dotnet_dir);
@@ -53,7 +63,7 @@ impl DotnetManager {
                 DotnetPhase::Checking
             },
             message: if is_sys {
-                "System .NET Runtime 8/9/10 found".to_string()
+                "System .NET Runtime 8 or newer found".to_string()
             } else if is_port {
                 "Portable .NET Runtime ready".to_string()
             } else {
@@ -66,12 +76,13 @@ impl DotnetManager {
             base_dir,
             status: Arc::new(RwLock::new(status)),
             is_working: Arc::new(AtomicBool::new(false)),
+            http,
         }
     }
 
-    /// Returns the path to use for DOTNET_ROOT. If .NET 8/9/10 is installed
-    /// in the system, returns None (use system runtime). Otherwise, returns
-    /// the portable runtime path if it exists.
+    /// Returns the path to use for DOTNET_ROOT. If a compatible system .NET
+    /// (8 or newer) is installed, returns None (use the system runtime).
+    /// Otherwise, returns the portable runtime path if it exists.
     pub fn get_dotnet_root(&self) -> Option<PathBuf> {
         if is_system_dotnet_installed() {
             return None;
@@ -92,11 +103,10 @@ impl DotnetManager {
         let mut st = self.status.read().clone();
         if !self.is_working.load(Ordering::SeqCst)
             && !matches!(st.phase, DotnetPhase::Downloading | DotnetPhase::Extracting)
+            && self.is_ready()
         {
-            if self.is_ready() {
-                st.phase = DotnetPhase::Ready;
-                st.progress = Some(100.0);
-            }
+            st.phase = DotnetPhase::Ready;
+            st.progress = Some(100.0);
         }
         st
     }
@@ -135,11 +145,11 @@ impl DotnetManager {
 
     pub async fn run_ensure_with_callback(
         &self,
-        on_progress: Option<Arc<dyn Fn(f32, &str) + Send + Sync>>,
+        on_progress: Option<ProgressCallback>,
     ) -> anyhow::Result<Option<PathBuf>> {
         // If system runtime is present, nothing to download
         if is_system_dotnet_installed() {
-            let msg = "System .NET Runtime 8/9/10 found".to_string();
+            let msg = "System .NET Runtime 8 or newer found".to_string();
             {
                 let mut guard = self.status.write();
                 guard.phase = DotnetPhase::Ready;
@@ -181,11 +191,12 @@ impl DotnetManager {
             cb(0.0, &start_msg);
         }
 
-        let client = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .build()?;
-
-        let mut response = client.get(DOTNET_RUNTIME_URL).send().await?;
+        let mut response = self
+            .http
+            .get(DOTNET_RUNTIME_URL)
+            .header(reqwest::header::USER_AGENT, crate::http::BROWSER_UA)
+            .send()
+            .await?;
         if !response.status().is_success() {
             anyhow::bail!("Failed to download .NET Runtime: HTTP {}", response.status());
         }
@@ -266,7 +277,7 @@ impl DotnetManager {
     }
 }
 
-/// Checks if .NET 8, 9, or 10 is installed by running `dotnet --list-runtimes`.
+/// Checks if a compatible .NET runtime is installed by running `dotnet --list-runtimes`.
 pub fn is_system_dotnet_installed() -> bool {
     let mut cmd = Command::new("dotnet");
     cmd.arg("--list-runtimes");
@@ -288,15 +299,22 @@ pub fn is_system_dotnet_installed() -> bool {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    for line in stdout.lines() {
-        if line.contains("Microsoft.NETCore.App")
-            && (line.contains(" 8.") || line.contains(" 9.") || line.contains(" 10."))
-        {
-            return true;
-        }
-    }
+    stdout.lines().any(runtime_line_supported)
+}
 
-    false
+/// Returns the `Microsoft.NETCore.App` major version reported by one `--list-runtimes` line, e.g.
+/// `Microsoft.NETCore.App 10.0.0 [C:\Program Files\dotnet\shared\Microsoft.NETCore.App]`.
+fn runtime_line_major(line: &str) -> Option<u32> {
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "Microsoft.NETCore.App" {
+        return None;
+    }
+    parts.next()?.split('.').next()?.parse().ok()
+}
+
+/// True when the line describes a `Microsoft.NETCore.App` runtime at or above the minimum.
+fn runtime_line_supported(line: &str) -> bool {
+    runtime_line_major(line).is_some_and(|major| major >= MIN_SYSTEM_DOTNET_MAJOR)
 }
 
 /// Checks if the portable runtime directory exists and looks valid.
@@ -320,7 +338,7 @@ fn extract_zip(zip_path: &Path, target_dir: &Path) -> anyhow::Result<()> {
             None => continue,
         };
 
-        if file.name().ends_with('/') {
+        if file.name()?.ends_with('/') {
             std::fs::create_dir_all(&outpath)?;
         } else {
             if let Some(p) = outpath.parent() {
@@ -332,4 +350,42 @@ fn extract_zip(zip_path: &Path, target_dir: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RUNTIME_LINES: [&str; 4] = [
+        "Microsoft.NETCore.App 8.0.11 [C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App]",
+        "Microsoft.NETCore.App 9.0.0 [C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App]",
+        "Microsoft.NETCore.App 10.0.4 [C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App]",
+        "Microsoft.NETCore.App 12.1.0 [C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App]",
+    ];
+
+    #[test]
+    fn reads_runtime_major_versions() {
+        assert_eq!(runtime_line_major(RUNTIME_LINES[0]), Some(8));
+        assert_eq!(runtime_line_major(RUNTIME_LINES[2]), Some(10));
+        assert_eq!(runtime_line_major(RUNTIME_LINES[3]), Some(12));
+        assert_eq!(runtime_line_major("Microsoft.NETCore.App"), None);
+        assert_eq!(runtime_line_major("Microsoft.AspNetCore.App 9.0.0 [x]"), None);
+        assert_eq!(runtime_line_major("Microsoft.NETCore.App unknown [x]"), None);
+        assert_eq!(runtime_line_major(""), None);
+    }
+
+    #[test]
+    fn accepts_runtime_major_eight_and_newer() {
+        for line in RUNTIME_LINES {
+            assert!(runtime_line_supported(line), "should accept: {line}");
+        }
+        for line in [
+            "Microsoft.NETCore.App 7.0.20 [C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App]",
+            "Microsoft.NETCore.App 6.0.36 [C:\\Program Files\\dotnet\\shared\\Microsoft.NETCore.App]",
+            "Microsoft.AspNetCore.App 9.0.0 [x]",
+            "Microsoft.NETCore.App beta [x]",
+        ] {
+            assert!(!runtime_line_supported(line), "should reject: {line}");
+        }
+    }
 }

@@ -32,7 +32,7 @@ impl LifecycleManager {
                     if en.load(Ordering::SeqCst) {
                         let diff = now_sec() - hb.load(Ordering::SeqCst);
                         if diff > 15 {
-                            eprintln!("[Lifecycle] Heartbeat lost for {diff}s, shutting down...");
+                            log_error!("heartbeat lost for {diff}s, shutting down");
                             std::process::exit(0);
                         }
                     }
@@ -63,7 +63,9 @@ pub static IS_UPDATING: AtomicBool = AtomicBool::new(false);
 
 fn start_wallpaperui_watcher() {
     std::thread::spawn(|| {
-        let mut sys = System::new();
+        let Ok(mut sys) = System::new() else {
+            return;
+        };
         // Wait up to 10 seconds for wallpaperui.exe to be present
         let mut target_pid = None;
         for _ in 0..20 {
@@ -83,17 +85,17 @@ fn start_wallpaperui_watcher() {
 
         #[cfg(windows)]
         if let Some(pid) = target_pid {
-            println!("[Lifecycle] Attached to wallpaperui.exe with PID {pid}");
+            log_info!("attached to wallpaperui.exe (pid {pid})");
             unsafe {
                 let handle: HANDLE = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
                 if !handle.is_null() {
                     WaitForSingleObject(handle, 0xFFFFFFFF); // INFINITE
                     CloseHandle(handle);
                     if IS_UPDATING.load(Ordering::SeqCst) {
-                        println!("[Lifecycle] wallpaperui.exe closed, but update is underway. Not terminating worker.");
+                        log_info!("wallpaperui.exe closed but an update is underway; keeping worker alive");
                         return;
                     }
-                    println!("[Lifecycle] wallpaperui.exe closed! Terminating worker...");
+                    log_info!("wallpaperui.exe closed; terminating worker");
                     std::process::exit(0);
                 }
             }

@@ -2,7 +2,121 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-const SCRIPTS_CONTENT: &str = include_str!("../scripts.js");
+const OVERLAY_CONTENT: &str = include_str!("../frontend/wengine-plus.js");
+/// One-line loader appended to the pristine frontend. The overlay path is
+/// resolved relative to the UI document (`ui/dist/index.html`), and
+/// `</script>` is escaped so the line is safe if the base is ever inlined.
+const OVERLAY_LOADER: &str =
+    "document.write('<script src=\"scripts/wengine-plus.js\"><\\/script>');\n";
+const OVERLAY_FILE: &str = "wengine-plus.js";
+
+/// Strings that only appear in a WEngine-Plus-patched frontend.
+const WEP_MARKERS: [&str; 4] = ["WengineHelper", "WEP_API_TOKEN", "WEP_LOCALES", "wengine-plus.js"];
+
+fn has_wep_markers(content: &str) -> bool {
+    WEP_MARKERS.iter().any(|marker| content.contains(marker))
+}
+
+/// Returns the pristine Wallpaper Engine frontend to patch: the installed
+/// `scripts.js` when a Wallpaper Engine update replaced it, otherwise the
+/// safety backup.
+fn resolve_pristine_base(target_dir: &Path) -> Result<PathBuf, String> {
+    let current = target_dir.join("scripts.js");
+    match fs::read_to_string(&current) {
+        Ok(content) if !has_wep_markers(&content) => return Ok(current),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("cannot read scripts.js: {e}")),
+    }
+
+    let backup = target_dir.join("scripts.js.bak");
+    if backup.exists() {
+        if let Ok(content) = fs::read_to_string(&backup) {
+            if !has_wep_markers(&content) {
+                return Ok(backup);
+            }
+        }
+    }
+
+    Err("scripts.js is already patched and no pristine scripts.js.bak is available".to_string())
+}
+
+/// Removes the overlay loader (and the newline that separated it from the base)
+/// so an installed file round-trips byte-exactly to the pristine one.
+fn strip_overlay_loader(content: &str) -> String {
+    let Some(idx) = content.rfind("scripts/wengine-plus.js") else {
+        return content.to_string();
+    };
+    let line_start = content[..idx].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let mut start = line_start;
+    if start > 0 {
+        start -= 1; // the '\n' in front of the loader
+        if start > 0 && content.as_bytes()[start - 1] == b'\r' {
+            start -= 1;
+        }
+    }
+    let line_end = content[idx..]
+        .find('\n')
+        .map(|p| idx + p + 1)
+        .unwrap_or(content.len());
+
+    let mut out = String::with_capacity(content.len());
+    out.push_str(&content[..start]);
+    out.push_str(&content[line_end..]);
+    out
+}
+
+/// Appends the one-line overlay loader on its own line, keeping the base line
+/// ending style and never adding it twice. The loader is the last line and has
+/// no trailing newline, which makes [`strip_overlay_loader`] exact.
+fn with_overlay_loader(mut base: String) -> String {
+    if base.contains("scripts/wengine-plus.js") {
+        return base;
+    }
+    let eol = if base.contains("\r\n") { "\r\n" } else { "\n" };
+    let loader_line = OVERLAY_LOADER.trim_end_matches(['\r', '\n']);
+    base.push_str(eol);
+    base.push_str(loader_line);
+    base
+}
+
+static VDF_PATH_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r#""path"\s+"([^"]+)""#).expect("vdf path regex")
+});
+
+static WE_VERSION_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r#""version"\s*:\s*"([^"]+)""#).expect("we version regex")
+});
+
+/// Wallpaper Engine version this patch was built and tested against.
+pub const BUILT_FOR_WE_VERSION: &str = "2.8.42";
+
+/// Reads `<WE>\version.json`.
+pub fn detect_we_version(we_dir: &Path) -> Option<String> {
+    let raw = fs::read_to_string(we_dir.join("version.json")).ok()?;
+    WE_VERSION_RE.captures(&raw).map(|caps| caps[1].to_string())
+}
+
+/// Returns the per-install API token, reusing the one written by a previous
+/// install so an auto-update does not invalidate the running UI.
+fn ensure_api_token(target_dir: &Path) -> String {
+    let token_path = target_dir.join("wengine-token");
+    if let Ok(raw) = fs::read_to_string(&token_path) {
+        let token = raw.trim();
+        if token.len() >= 32 && token.len() <= 128 && token.chars().all(|c| c.is_ascii_hexdigit()) {
+            return token.to_string();
+        }
+    }
+
+    use rand::RngExt;
+    let mut rng = rand::rng();
+    let mut token = String::with_capacity(48);
+    for _ in 0..48 {
+        token.push(char::from_digit(rng.random_range(0..16), 16).expect("hex digit"));
+    }
+    let _ = fs::write(&token_path, &token);
+    token
+}
 
 #[cfg(windows)]
 fn setup_console() -> bool {
@@ -117,15 +231,16 @@ fn resolve_scripts_dir(path: &Path) -> Option<PathBuf> {
 
 fn find_wallpaper_engine_scripts() -> Option<PathBuf> {
     // 1. Running Wallpaper Engine process
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    for p in sys.processes().values() {
-        let name = p.name().to_string_lossy().to_lowercase();
-        if name == "wallpaper64.exe" || name == "wallpaper32.exe" {
-            if let Some(exe_path) = p.exe() {
-                if let Some(parent) = exe_path.parent() {
-                    if let Some(res) = resolve_scripts_dir(parent) {
-                        return Some(res);
+    if let Ok(mut sys) = sysinfo::System::new() {
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        for p in sys.processes().values() {
+            let name = p.name().to_string_lossy().to_lowercase();
+            if name == "wallpaper64.exe" || name == "wallpaper32.exe" {
+                if let Some(exe_path) = p.exe() {
+                    if let Some(parent) = exe_path.parent() {
+                        if let Some(res) = resolve_scripts_dir(parent) {
+                            return Some(res);
+                        }
                     }
                 }
             }
@@ -176,14 +291,12 @@ fn find_wallpaper_engine_scripts() -> Option<PathBuf> {
             let vdf_path = root.join("steamapps").join("libraryfolders.vdf");
             if vdf_path.exists() {
                 if let Ok(content) = fs::read_to_string(&vdf_path) {
-                    if let Ok(re) = regex::Regex::new(r#""path"\s+"([^"]+)""#) {
-                        for cap in re.captures_iter(&content) {
-                            if let Some(m) = cap.get(1) {
-                                let lib_str = m.as_str().replace(r"\\", r"\");
-                                let lib_cand = PathBuf::from(lib_str).join("steamapps").join("common").join("wallpaper_engine");
-                                if let Some(res) = resolve_scripts_dir(&lib_cand) {
-                                    return Some(res);
-                                }
+                    for cap in VDF_PATH_RE.captures_iter(&content) {
+                        if let Some(m) = cap.get(1) {
+                            let lib_str = m.as_str().replace(r"\\", r"\");
+                            let lib_cand = PathBuf::from(lib_str).join("steamapps").join("common").join("wallpaper_engine");
+                            if let Some(res) = resolve_scripts_dir(&lib_cand) {
+                                return Some(res);
                             }
                         }
                     }
@@ -254,15 +367,16 @@ fn find_wallpaper_engine_scripts() -> Option<PathBuf> {
 
 pub fn find_wallpaper_engine_dir() -> PathBuf {
     // 1. Running Wallpaper Engine process
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    for p in sys.processes().values() {
-        let name = p.name().to_string_lossy().to_lowercase();
-        if name == "wallpaper64.exe" || name == "wallpaper32.exe" {
-            if let Some(exe_path) = p.exe() {
-                if let Some(parent) = exe_path.parent() {
-                    if parent.join("wallpaper64.exe").exists() || parent.join("wallpaper32.exe").exists() {
-                        return parent.to_path_buf();
+    if let Ok(mut sys) = sysinfo::System::new() {
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        for p in sys.processes().values() {
+            let name = p.name().to_string_lossy().to_lowercase();
+            if name == "wallpaper64.exe" || name == "wallpaper32.exe" {
+                if let Some(exe_path) = p.exe() {
+                    if let Some(parent) = exe_path.parent() {
+                        if parent.join("wallpaper64.exe").exists() || parent.join("wallpaper32.exe").exists() {
+                            return parent.to_path_buf();
+                        }
                     }
                 }
             }
@@ -329,7 +443,9 @@ pub fn find_wallpaper_engine_dir() -> PathBuf {
 }
 
 fn kill_other_helper_instances() {
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else {
+        return;
+    };
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let my_pid = sysinfo::get_current_pid().ok();
 
@@ -394,27 +510,39 @@ pub fn run_setup_mode(silent: bool) {
         println!("[2/3] Installing wengine-helper daemon...");
     }
 
+    // A patched scripts.js is tied to the UI build it was derived from; warn
+    // instead of silently installing a patch for another version.
+    if let Some(version) = target_dir.ancestors().nth(3).and_then(detect_we_version) {
+        if version != BUILT_FOR_WE_VERSION && !silent {
+            println!("[!] Wallpaper Engine {version} detected; this build targets {BUILT_FOR_WE_VERSION}.");
+            println!("    The patched frontend may not match the current UI build.");
+        } else if !silent {
+            println!("[+] Wallpaper Engine version: {version}");
+        }
+    }
+
     // 2. Wait for wallpaperui to close if running in silent mode (e.g. during auto-update)
     if silent {
-        let mut sys = sysinfo::System::new();
-        for _ in 0..20 {
-            sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-            let has_ui = sys.processes().values().any(|p| {
-                let name = p.name().to_string_lossy().to_lowercase();
-                name == "wallpaperui.exe" || name == "wallpaperui"
-            });
-            if !has_ui {
-                break;
+        if let Ok(mut sys) = sysinfo::System::new() {
+            for _ in 0..20 {
+                sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                let has_ui = sys.processes().values().any(|p| {
+                    let name = p.name().to_string_lossy().to_lowercase();
+                    name == "wallpaperui.exe" || name == "wallpaperui"
+                });
+                if !has_ui {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
 
-        // Force-terminate any lingering wallpaperui processes if still alive
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        for p in sys.processes().values() {
-            let name = p.name().to_string_lossy().to_lowercase();
-            if name == "wallpaperui.exe" || name == "wallpaperui" {
-                p.kill();
+            // Force-terminate any lingering wallpaperui processes if still alive
+            sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            for p in sys.processes().values() {
+                let name = p.name().to_string_lossy().to_lowercase();
+                if name == "wallpaperui.exe" || name == "wallpaperui" {
+                    p.kill();
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -499,20 +627,55 @@ pub fn run_setup_mode(silent: bool) {
         }
     }
 
-    // Write updated scripts.js (retry loop in case of brief file lock)
+    // Write the base and the overlay with the per-install API token (retry loop
+    // in case of a brief file lock).
     if !silent {
         print!("[*] Writing updated scripts.js ... ");
     }
-    let mut written = false;
-    for _ in 0..10 {
-        if fs::write(&target_scripts, SCRIPTS_CONTENT.as_bytes()).is_ok() {
-            written = true;
-            break;
+    let api_token = ensure_api_token(&target_dir);
+
+    // The base always comes from the pristine Wallpaper Engine frontend: the
+    // backup created above, or the installed scripts.js when it is untouched.
+    let base_path = match resolve_pristine_base(&target_dir) {
+        Ok(path) => path,
+        Err(e) => {
+            if !silent {
+                println!("[-] ERROR: {e}");
+                println!("    Restore scripts.js via Steam (Verify integrity) and run setup again.");
+                wait_for_enter(should_wait);
+            }
+            std::process::exit(1);
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    };
+    let base_source = match fs::read_to_string(&base_path) {
+        Ok(content) => content,
+        Err(e) => {
+            if !silent {
+                println!("[-] ERROR: cannot read {}: {e}", base_path.display());
+                wait_for_enter(should_wait);
+            }
+            std::process::exit(1);
+        }
+    };
+
+    let scripts_content = with_overlay_loader(
+        base_source.replace(crate::api_security::TOKEN_PLACEHOLDER, &api_token),
+    );
+
+    let written = write_with_retries(&target_scripts, scripts_content.as_bytes());
     if !silent {
         if written { println!("OK"); } else { println!("FAILED"); }
+    }
+
+    if !silent {
+        print!("[*] Writing {OVERLAY_FILE} ... ");
+    }
+    let overlay_content =
+        OVERLAY_CONTENT.replace(crate::api_security::TOKEN_PLACEHOLDER, &api_token);
+    let target_overlay = target_dir.join(OVERLAY_FILE);
+    let overlay_written = write_with_retries(&target_overlay, overlay_content.as_bytes());
+    if !silent {
+        if overlay_written { println!("OK"); } else { println!("FAILED"); }
     }
 
     // 5. Clean up temporary files (.update and .old)
@@ -618,4 +781,302 @@ pub fn run_setup_mode(silent: bool) {
 
     wait_for_enter(should_wait);
     std::process::exit(0);
+}
+
+pub fn run_uninstall(silent: bool) {
+    let is_new_window = if !silent { setup_console() } else { false };
+    let should_wait = !silent && is_new_window;
+
+    let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("wengine-helper.exe"));
+    let exe_dir = exe_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let target_dir = if exe_dir.join("scripts.js").exists() {
+        exe_dir.clone()
+    } else if current_dir.join("scripts.js").exists()
+        && (exe_dir.ends_with("release") || exe_dir.ends_with("debug"))
+    {
+        current_dir.clone()
+    } else {
+        match find_wallpaper_engine_scripts() {
+            Some(dir) => dir,
+            None => {
+                if !silent {
+                    println!("[-] ERROR: Could not locate Wallpaper Engine scripts directory.");
+                    wait_for_enter(should_wait);
+                }
+                std::process::exit(1);
+            }
+        }
+    };
+
+    if !silent {
+        println!();
+        println!("==============================================================");
+        println!("                    WEngine Plus - Uninstall                  ");
+        println!("==============================================================");
+        println!();
+        println!("[+] Target directory: {}", target_dir.display());
+        println!("[*] Stopping helper instances...");
+    }
+
+    kill_other_helper_instances();
+
+    // 1. Restore the pristine frontend. A Wallpaper Engine update replaces
+    // scripts.js with a new pristine file, so prefer stripping our one line over
+    // restoring an older backup.
+    let scripts = target_dir.join("scripts.js");
+    let backup = target_dir.join("scripts.js.bak");
+    let mut restored = false;
+
+    if let Ok(current) = fs::read_to_string(&scripts) {
+        let stripped = strip_overlay_loader(&current);
+        if stripped.len() != current.len() && !has_wep_markers(&stripped) {
+            for _ in 0..15 {
+                if fs::write(&scripts, stripped.as_bytes()).is_ok() {
+                    restored = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            if restored && !silent {
+                println!("[+] Removed the overlay loader from scripts.js");
+            }
+        }
+    }
+
+    if !restored && backup.exists() {
+        for _ in 0..15 {
+            if fs::copy(&backup, &scripts).is_ok() {
+                restored = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        if restored && !silent {
+            println!("[+] Restored the original scripts.js");
+        } else if !silent {
+            println!("[-] Could not restore scripts.js (file is locked); backup kept.");
+        }
+    }
+
+    if restored {
+        let _ = fs::remove_file(&backup);
+    } else if !silent {
+        println!("[!] Could not determine a pristine scripts.js; leaving the current file untouched.");
+    }
+
+    // 2. Remove everything WEngine-Plus owns inside the scripts directory.
+    let files = [
+        "wengine-helper.exe.old",
+        "wengine-helper.exe.update",
+        "wengine-plus.js",
+        "wengine-token",
+        "wengine-helper.log",
+        "wengine-helper.log.old",
+        "metadata.json",
+        "steam_session.json",
+        "download_accounts.json",
+    ];
+    for name in files {
+        let path = target_dir.join(name);
+        if path.exists() && remove_with_retries(&path).is_ok() && !silent {
+            println!("[-] Removed {name}");
+        }
+    }
+    for dir in ["plugins", "dotnet"] {
+        let path = target_dir.join(dir);
+        if path.exists() {
+            let _ = fs::remove_dir_all(&path);
+            if !silent {
+                println!("[-] Removed {dir}/");
+            }
+        }
+    }
+
+    // 3. A running executable cannot delete itself on Windows: rename/remove the
+    // helper image after this process exits.
+    let self_exe = target_dir.join("wengine-helper.exe");
+    if self_exe.exists() {
+        schedule_self_delete(&self_exe, std::process::id());
+    }
+
+    if !silent {
+        println!();
+        println!("[SUCCESS] WEngine Plus has been uninstalled.");
+        wait_for_enter(should_wait);
+    }
+    std::process::exit(0);
+}
+
+fn write_with_retries(path: &Path, bytes: &[u8]) -> bool {
+    for _ in 0..10 {
+        if fs::write(path, bytes).is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    false
+}
+
+fn remove_with_retries(path: &Path) -> io::Result<()> {
+    let mut last = Ok(());
+    for _ in 0..10 {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Err(e),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    last
+}
+
+fn schedule_self_delete(exe: &Path, pid: u32) {
+    let escaped = exe.to_string_lossy().replace('\'', "''");
+    let ps_script = format!(
+        "$p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; if ($p) {{ $p.WaitForExit(60000) }}; for ($i = 0; $i -lt 40; $i++) {{ Start-Sleep -Milliseconds 250; try {{ [System.IO.File]::Delete('{escaped}'); break }} catch {{}} }}"
+    );
+
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_script]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let _ = cmd.spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn overlay_and_loader_are_embedded() {
+        assert!(OVERLAY_CONTENT.len() > 100_000);
+        assert!(OVERLAY_CONTENT.contains(crate::api_security::TOKEN_PLACEHOLDER));
+        assert!(OVERLAY_LOADER.contains("scripts/wengine-plus.js"));
+        assert!(OVERLAY_LOADER.contains("<\\/script>"));
+        assert!(OVERLAY_FILE.ends_with(".js"));
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("wep-{tag}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn detects_patched_frontends() {
+        assert!(!has_wep_markers("var x = 1;"));
+        assert!(has_wep_markers("window.WengineHelper = {}"));
+        assert!(has_wep_markers("window.WEP_API_TOKEN = 'x'"));
+        assert!(has_wep_markers("window.WEP_LOCALES = {}"));
+        assert!(has_wep_markers(
+            "document.write('<script src=\"scripts/wengine-plus.js\">')"
+        ));
+    }
+
+    #[test]
+    fn picks_pristine_base() {
+        let dir = temp_dir("pristine");
+        // Backup only (upgrade of an already-patched install).
+        fs::write(dir.join("scripts.js.bak"), "pristine").unwrap();
+        assert_eq!(
+            resolve_pristine_base(&dir).unwrap(),
+            dir.join("scripts.js.bak")
+        );
+
+        // A pristine current file wins over the backup: after a Wallpaper
+        // Engine update the installed file is newer than the old backup.
+        fs::write(dir.join("scripts.js"), "pristine-new").unwrap();
+        assert_eq!(resolve_pristine_base(&dir).unwrap(), dir.join("scripts.js"));
+
+        fs::write(dir.join("scripts.js.bak"), "window.WengineHelper = {}").unwrap();
+        fs::write(dir.join("scripts.js"), "pristine").unwrap();
+        assert_eq!(resolve_pristine_base(&dir).unwrap(), dir.join("scripts.js"));
+
+        fs::write(dir.join("scripts.js"), "window.WEP_LOCALES = {}").unwrap();
+        assert!(resolve_pristine_base(&dir).is_err());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn appends_loader_once() {
+        let once = with_overlay_loader("line1\r\nline2\r\n".to_string());
+        assert!(once.contains("document.write('<script src=\"scripts/wengine-plus.js\"><\\/script>');"));
+        assert!(!once.ends_with('\n'));
+        assert_eq!(once.matches("scripts/wengine-plus.js").count(), 1);
+        assert_eq!(with_overlay_loader(once.clone()), once);
+        assert_eq!(strip_overlay_loader(&once), "line1\r\nline2\r\n");
+
+        let lf = with_overlay_loader("x\n".to_string());
+        assert!(!lf.contains("\r\n"));
+        assert_eq!(strip_overlay_loader(&lf), "x\n");
+
+        // A file without a trailing newline must round-trip too.
+        let no_eol = with_overlay_loader("abc".to_string());
+        assert_eq!(strip_overlay_loader(&no_eol), "abc");
+    }
+
+    #[test]
+    fn strips_overlay_loader() {
+        let base = "line1\r\nline2\r\n";
+        let installed = with_overlay_loader(base.to_string());
+        assert_eq!(strip_overlay_loader(&installed), base);
+        assert!(!has_wep_markers(&strip_overlay_loader(&installed)));
+        // A file without the loader is returned unchanged.
+        assert_eq!(strip_overlay_loader("abc\n"), "abc\n");
+    }
+
+    #[test]
+    fn detects_we_version_file() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("wep-ver-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(detect_we_version(&dir), None);
+        fs::write(
+            dir.join("version.json"),
+            "{\n\t\"version\" : \"2.8.42\"\n}\n",
+        )
+        .unwrap();
+        assert_eq!(detect_we_version(&dir).as_deref(), Some("2.8.42"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reuses_existing_api_token() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("wep-setup-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let first = ensure_api_token(&dir);
+        assert_eq!(first.len(), 48);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(ensure_api_token(&dir), first);
+
+        fs::write(dir.join("wengine-token"), "too-short").unwrap();
+        let rotated = ensure_api_token(&dir);
+        assert_ne!(rotated, "too-short");
+        assert_eq!(rotated.len(), 48);
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

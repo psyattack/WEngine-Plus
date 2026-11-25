@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag matches package version
+        shell: pwsh
+        run: |
+          # Publishing is only allowed from a v* tag (a manual dispatch must select the tag too):
+          # the release is published under github.ref_name and the in-app updater compares the
+          # Cargo.toml version with the release tag, so a branch or a mismatched tag would publish
+          # an update that never installs.
+          if ($env:GITHUB_REF_TYPE -ne 'tag') {
+              throw "Release builds must run from a v* tag, not '$env:GITHUB_REF'."
+          }
+          $cargoToml = Get-Content Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+              throw 'Unable to read the package version from Cargo.toml'
+          }
+          $version = $matches[1]
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -ne "v$version") {
+              throw "Tag '$tag' does not match the Cargo.toml version '$version' (expected 'v$version')."
+          }
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Building release $tag from $env:GITHUB_REF."
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Build Release Binary
+        run: cargo build --release --locked
+
+      - name: Verify executable version resources
+        shell: pwsh
+        run: |
+          # winres derives the resource versions from Cargo.toml; fail before publishing if the
+          # VERSIONINFO the updater and Explorer see does not match the release version.
+          $exe = 'target/release/wengine-helper.exe'
+          if (-not (Test-Path $exe)) {
+              throw "Release executable not found at $exe"
+          }
+          $info = (Get-Item $exe).VersionInfo
+          $expected = [version]"$($env:APP_VERSION).0"
+          if ($info.FileVersionRaw -ne $expected -or $info.ProductVersionRaw -ne $expected) {
+              throw "Executable version resources report FileVersion '$($info.FileVersionRaw)' and ProductVersion '$($info.ProductVersionRaw)', expected '$expected'."
+          }
+          Write-Host "Executable version resources verified: $expected"
+
+      - name: Verify and Stage Artifacts
+        shell: pwsh
+        run: |
+          $ver = $env:APP_VERSION
+          $distDir = 'dist_artifacts'
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+
+          $exe = 'target/release/wengine-helper.exe'
+          if (-not (Test-Path $exe)) {
+              throw "Release executable not found at $exe"
+          }
+
+          # The in-app updater downloads this exact asset and accepts only files that are at least
+          # 1 MiB and start with the PE "MZ" signature. Fail here instead of publishing an asset
+          # the updater would reject.
+          $length = (Get-Item $exe).Length
+          $header = [System.IO.File]::ReadAllBytes($exe)[0..1]
+          if ($length -lt 1MB) {
+              throw "Executable is unexpectedly small ($length bytes)"
+          }
+          if ($header[0] -ne 0x4D -or $header[1] -ne 0x5A) {
+              throw 'Executable does not start with the MZ signature'
+          }
+
+          Copy-Item $exe (Join-Path $distDir 'wengine-helper.exe')
+          Compress-Archive -Path $exe, 'README.md', 'LICENSE', 'NOTICES.md' `
+              -DestinationPath (Join-Path $distDir "WEngine-Plus-v$ver-Windows-x64.zip") -Force
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem -Path dist_artifacts -File |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash -Algorithm SHA256 -Path $_.FullName).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+          $lines | Set-Content -Path dist_artifacts/SHA256SUMS.txt -Encoding ascii
+
+      - name: Extract Release Notes from CHANGELOG.md
+        id: extract_notes
+        shell: pwsh
+        run: |
+          if (Test-Path CHANGELOG.md) {
+              $changelog = Get-Content CHANGELOG.md -Raw
+              # Match notes from the first `## [` heading until the next one or the end of the file.
+              if ($changelog -match "(?ms)^##\s+\[.*?\]\s*.*?\r?\n(.*?)(?=^##\s+\[|\z)") {
+                  $notes = $matches[1].Trim()
+                  Set-Content -Path 'release_notes.md' -Value $notes -Encoding utf8
+                  Write-Host 'Extracted release notes from CHANGELOG.md.'
+              } else {
+                  Set-Content -Path 'release_notes.md' -Value "WEngine-Plus $env:GITHUB_REF_NAME" -Encoding utf8
+                  Write-Host 'Fallback release notes used.'
+              }
+          } else {
+              Set-Content -Path 'release_notes.md' -Value "WEngine-Plus $env:GITHUB_REF_NAME" -Encoding utf8
+              Write-Host 'Default release notes used.'
+          }
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: WEngine-Plus ${{ github.ref_name }}
+          body_path: release_notes.md
+          files: dist_artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -75,10 +75,8 @@ impl DownloadManager {
         plugin_path: PathBuf,
         dotnet_root: Option<PathBuf>,
     ) -> anyhow::Result<()> {
-        let pubfileid = pubfileid.trim().to_string();
-        if pubfileid.is_empty() {
-            anyhow::bail!("Empty pubfileid");
-        }
+        let pubfileid = crate::api_security::sanitize_pubfileid(&pubfileid)
+            .ok_or_else(|| anyhow::anyhow!("Invalid pubfileid"))?;
 
         // Check if already downloading
         if let Some(existing) = self.tasks.lock().get(&pubfileid) {
@@ -155,8 +153,13 @@ impl DownloadManager {
                     "-verify-all",
                     "-username",
                     &username,
-                    "-password",
-                    &password,
+                ]);
+                // Saved sessions live in DepotDownloaderMod's own store; passing
+                // an empty `-password` next to `-remember-password` breaks them.
+                if !password.is_empty() {
+                    cmd.arg("-password").arg(&password);
+                }
+                cmd.args([
                     "-remember-password",
                     "-loginid",
                     &login_id.to_string(),
@@ -348,9 +351,20 @@ impl DownloadManager {
     }
 
     pub async fn cancel(&self, pubfileid: &str, we_dir: &Path) -> bool {
-        self.cancelled.lock().insert(pubfileid.to_string());
+        let Some(pubfileid) = crate::api_security::sanitize_pubfileid(pubfileid) else {
+            return false;
+        };
 
-        let holder = self.handles.lock().remove(pubfileid);
+        let was_active = self
+            .tasks
+            .lock()
+            .get(&pubfileid)
+            .map(|task| matches!(task.phase, Phase::Starting | Phase::Running))
+            .unwrap_or(false);
+        self.cancelled.lock().insert(pubfileid.clone());
+
+        let holder = self.handles.lock().remove(&pubfileid);
+        let had_handle = holder.is_some();
         if let Some(holder) = holder {
             let mut guard = holder.lock().await;
             if let Some(child) = guard.as_mut() {
@@ -358,22 +372,25 @@ impl DownloadManager {
             }
         }
 
-        let mut guard = self.tasks.lock();
-        if let Some(t) = guard.get_mut(pubfileid) {
-            t.status = "Cancelled".to_string();
-            t.phase = Phase::Cancelled;
-            t.progress = None;
+        {
+            let mut guard = self.tasks.lock();
+            if let Some(task) = guard.get_mut(&pubfileid) {
+                task.status = "Cancelled".to_string();
+                task.phase = Phase::Cancelled;
+                task.progress = None;
+            }
         }
 
-        let folder = we_dir
-            .join("projects")
-            .join("myprojects")
-            .join(pubfileid);
-        if folder.exists() {
-            let _ = std::fs::remove_dir_all(&folder);
+        // Remove only the partial download this call actually cancelled: a
+        // cancel for a finished/installed wallpaper must never delete it.
+        if was_active || had_handle {
+            let folder = we_dir.join("projects").join("myprojects").join(&pubfileid);
+            if folder.exists() {
+                let _ = std::fs::remove_dir_all(&folder);
+            }
         }
 
-        true
+        was_active || had_handle
     }
 }
 

@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and troubleshooting
+    url: https://github.com/psyattack/WEngine-Plus/blob/main/docs/FAQ.md
+    about: Installation, updates, the daemon, downloads, extraction, accounts, filters and logs.
+  - name: Architecture and internals
+    url: https://github.com/psyattack/WEngine-Plus/blob/main/docs/ARCHITECTURE.md
+    about: How the setup patch, the helper daemon and the frontend overlay work.
+  - name: Local HTTP API
+    url: https://github.com/psyattack/WEngine-Plus/blob/main/docs/API.md
+    about: Authentication, every endpoint, request and response shapes.
+  - name: Security policy
+    url: https://github.com/psyattack/WEngine-Plus/blob/main/SECURITY.md
+    about: Report vulnerabilities privately; do not open a public issue.

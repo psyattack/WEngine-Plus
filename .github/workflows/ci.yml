@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  rust:
+    name: Rust Check, Test & Lint
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+
+      # The overlay is shipped as-is; this is the only static check it has.
+      - name: Overlay syntax
+        run: node --check frontend/wengine-plus.js
+
+      - name: Cargo Check
+        run: cargo check --locked --all-targets
+
+      - name: Cargo Test
+        run: cargo test --locked --all-targets
+
+      - name: Cargo Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings

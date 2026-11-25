@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, KeyInit, Nonce};
+use aes_gcm::Aes256Gcm;
 use base64::{engine::general_purpose, Engine as _};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -31,9 +31,11 @@ pub(crate) fn load_builtin_bundle() -> Result<BuiltinAccountsBundle, String> {
     }
     let (nonce, ciphertext) = raw.split_at(12);
     let key = Sha256::digest(BUILTIN_ACCOUNT_BUNDLE_KEY);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
+    let nonce = Nonce::<Aes256Gcm>::try_from(nonce)
+        .map_err(|_| "Built-in account bundle has a malformed nonce".to_string())?;
     let plaintext = cipher
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| e.to_string())?;
     serde_json::from_slice(&plaintext).map_err(|e| e.to_string())
 }

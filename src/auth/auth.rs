@@ -2,16 +2,59 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use parking_lot::RwLock;
 use qrcode::render::svg;
 use qrcode::QrCode;
-use rand::distributions::Alphanumeric;
-use rand::Rng;
-use rsa::{BigUint, Pkcs1v15Encrypt, RsaPublicKey};
+use rand::distr::Alphanumeric;
+use rand::RngExt;
+use rsa::{BoxedUint, PublicKey};
 use serde::{Deserialize, Serialize};
+
+use once_cell::sync::Lazy;
+
+static RE_STEAM_ID_CDATA: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"<steamID><!\[CDATA\[(.*?)\]\]></steamID>").expect("steamID regex"));
+static RE_AVATAR_CDATA: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"<avatarMedium><!\[CDATA\[(.*?)\]\]></avatarMedium>").expect("avatar regex")
+});
+
+/// Decodes a hex-encoded big-endian number; Steam returns its RSA modulus and
+/// public exponent in this form.
+fn hex_to_boxed_uint(hex: &str) -> Option<BoxedUint> {
+    let clean = hex.trim();
+    if clean.is_empty() || !clean.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let digits = clean.as_bytes();
+    let mut bytes = Vec::with_capacity(digits.len() / 2 + 1);
+    let mut index = 0;
+    if digits.len() % 2 == 1 {
+        bytes.push(hex_digit(digits[0])?);
+        index = 1;
+    }
+    while index < digits.len() {
+        let high = hex_digit(digits[index])?;
+        let low = hex_digit(digits[index + 1])?;
+        bytes.push((high << 4) | low);
+        index += 2;
+    }
+
+    Some(BoxedUint::from_be_slice_vartime(&bytes))
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AuthSession {
@@ -52,10 +95,11 @@ pub struct AuthManager {
     session: Arc<RwLock<Option<AuthSession>>>,
     storage_path: PathBuf,
     is_logging_in: Arc<AtomicBool>,
+    http: reqwest::Client,
 }
 
 impl AuthManager {
-    pub fn new(storage_dir: &Path) -> Self {
+    pub fn new(storage_dir: &Path, http: reqwest::Client) -> Self {
         let storage_path = storage_dir.join("steam_session.json");
         let initial_session = if storage_path.exists() {
             fs::read_to_string(&storage_path)
@@ -69,6 +113,7 @@ impl AuthManager {
             session: Arc::new(RwLock::new(initial_session)),
             storage_path,
             is_logging_in: Arc::new(AtomicBool::new(false)),
+            http,
         }
     }
 
@@ -107,9 +152,10 @@ impl AuthManager {
     }
 
     pub async fn begin_qr(&self) -> anyhow::Result<QrBeginResult> {
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self
+            .http
             .post("https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaQR/v1/")
+            .timeout(Duration::from_secs(30))
             .form(&[
                 ("device_friendly_name", "WallpaperEngine"),
                 ("platform_type", "2"),
@@ -138,7 +184,8 @@ impl AuthManager {
             .ok_or_else(|| anyhow::anyhow!("Missing request_id"))?
             .to_string();
 
-        let qr = QrCode::new(challenge_url.as_bytes())?;
+        let qr = QrCode::new(challenge_url.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Failed to build the QR code: {e:?}"))?;
         let qr_svg = qr
             .render::<svg::Color>()
             .min_dimensions(220, 220)
@@ -153,9 +200,10 @@ impl AuthManager {
     }
 
     pub async fn poll_qr(&self, client_id: &str, request_id: &str) -> QrPollResult {
-        let client = reqwest::Client::new();
-        let resp = match client
+        let resp = match self
+            .http
             .post("https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1/")
+            .timeout(Duration::from_secs(30))
             .form(&[("client_id", client_id), ("request_id", request_id)])
             .send()
             .await
@@ -240,7 +288,7 @@ impl AuthManager {
             };
 
             let steam_login_secure = format!("{}%7C%7C{}", steamid, access_token);
-            let sessionid: String = rand::thread_rng()
+            let sessionid: String = rand::rng()
                 .sample_iter(&Alphanumeric)
                 .take(32)
                 .map(char::from)
@@ -251,18 +299,18 @@ impl AuthManager {
             let mut persona_name = None;
             let mut avatar_url = None;
             let profile_url = format!("https://steamcommunity.com/profiles/{steamid}/?xml=1");
-            if let Ok(xml_resp) = client.get(&profile_url).send().await {
+            if let Ok(xml_resp) = self
+                .http
+                .get(&profile_url)
+                .timeout(Duration::from_secs(30))
+                .send()
+                .await
+            {
                 if let Ok(xml_text) = xml_resp.text().await {
-                    if let Some(name_cap) = regex::Regex::new(r"<steamID><!\[CDATA\[(.*?)\]\]></steamID>")
-                        .unwrap()
-                        .captures(&xml_text)
-                    {
+                    if let Some(name_cap) = RE_STEAM_ID_CDATA.captures(&xml_text) {
                         persona_name = Some(name_cap[1].to_string());
                     }
-                    if let Some(av_cap) = regex::Regex::new(r"<avatarMedium><!\[CDATA\[(.*?)\]\]></avatarMedium>")
-                        .unwrap()
-                        .captures(&xml_text)
-                    {
+                    if let Some(av_cap) = RE_AVATAR_CDATA.captures(&xml_text) {
                         avatar_url = Some(av_cap[1].to_string());
                     }
                 }
@@ -311,7 +359,7 @@ impl AuthManager {
         steam_login_secure: String,
         persona_name: Option<String>,
     ) -> anyhow::Result<AuthStatus> {
-        let sessionid: String = rand::thread_rng()
+        let sessionid: String = rand::rng()
             .sample_iter(&Alphanumeric)
             .take(32)
             .map(char::from)
@@ -356,13 +404,14 @@ impl AuthManager {
     }
 
     async fn login_credentials_inner(&self, username: &str, password: &str) -> anyhow::Result<AuthStatus> {
-        let client = reqwest::Client::new();
         let key_url = format!(
             "https://api.steampowered.com/IAuthenticationService/GetPasswordRSAPublicKey/v1/?account_name={}",
             username
         );
-        let key_resp = client
+        let key_resp = self
+            .http
             .get(&key_url)
+            .timeout(Duration::from_secs(30))
             .send()
             .await?
             .json::<serde_json::Value>()
@@ -383,20 +432,21 @@ impl AuthManager {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing timestamp"))?;
 
-        let n = BigUint::parse_bytes(mod_hex.as_bytes(), 16)
+        let n = hex_to_boxed_uint(mod_hex)
             .ok_or_else(|| anyhow::anyhow!("Invalid RSA modulus hex"))?;
-        let e = BigUint::parse_bytes(exp_hex.as_bytes(), 16)
+        let e = hex_to_boxed_uint(exp_hex)
             .ok_or_else(|| anyhow::anyhow!("Invalid RSA exponent hex"))?;
-        let pub_key = RsaPublicKey::new(n, e)?;
+        let pub_key = PublicKey::new(n, e)?;
 
         let enc_b64 = {
-            let mut rng = rand::thread_rng();
-            let enc_bytes = pub_key.encrypt(&mut rng, Pkcs1v15Encrypt, password.as_bytes())?;
+            let enc_bytes = pub_key.pkcs1v15_encrypt(password.as_bytes())?;
             base64::engine::general_purpose::STANDARD.encode(&enc_bytes)
         };
 
-        let begin_resp = client
+        let begin_resp = self
+            .http
             .post("https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaCredentials/v1/")
+            .timeout(Duration::from_secs(30))
             .form(&[
                 ("account_name", username),
                 ("encrypted_password", &enc_b64),
@@ -423,13 +473,15 @@ impl AuthManager {
             .ok_or_else(|| anyhow::anyhow!("Missing request_id"))?;
 
         let poll_res = self.poll_qr(client_id, request_id).await;
-        if poll_res.status == "success" && poll_res.session.is_some() {
-            Ok(poll_res.session.unwrap())
-        } else if let Some(err) = poll_res.error {
-            anyhow::bail!("{err}")
-        } else {
-            anyhow::bail!("Status: {}", poll_res.status)
+        if poll_res.status == "success" {
+            if let Some(session) = poll_res.session {
+                return Ok(session);
+            }
         }
+        if let Some(err) = poll_res.error {
+            anyhow::bail!("{err}")
+        }
+        anyhow::bail!("Status: {}", poll_res.status)
     }
 
     pub async fn login_system_account(&self) -> anyhow::Result<AuthStatus> {

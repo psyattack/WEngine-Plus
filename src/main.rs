@@ -1,5 +1,23 @@
 #![windows_subsystem = "windows"]
 
+macro_rules! log_info {
+    ($($arg:tt)*) => {
+        $crate::logging::write("INFO", &format!($($arg)*))
+    };
+}
+
+macro_rules! log_warn {
+    ($($arg:tt)*) => {
+        $crate::logging::write("WARN", &format!($($arg)*))
+    };
+}
+
+macro_rules! log_error {
+    ($($arg:tt)*) => {
+        $crate::logging::write("ERROR", &format!($($arg)*))
+    };
+}
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -11,11 +29,20 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{middleware, Extension, Router};
 use serde::Deserialize;
-use tower_http::cors::{Any, CorsLayer};
 
+use once_cell::sync::Lazy;
+
+static WALLPAPER_PATH_ID_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"(?:myprojects|workshop)[/\\](\d+)"#).expect("wallpaper path id regex")
+});
+
+mod api_security;
 mod auth;
+mod dialog;
+mod http;
+mod logging;
 mod setup;
 mod services;
 mod steam;
@@ -69,24 +96,22 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from("."));
 
     // Detect Wallpaper Engine directory and parent process
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-
-    let is_parent_we = sysinfo::get_current_pid().ok().and_then(|pid| {
-        sys.process(pid).and_then(|p| p.parent()).and_then(|ppid| {
-            sys.process(ppid).map(|pp| {
-                let pname = pp.name().to_string_lossy().to_lowercase();
-                pname.contains("wallpaper")
+    let is_parent_we = sysinfo::System::new().is_ok_and(|mut sys| {
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        sysinfo::get_current_pid().ok().and_then(|pid| {
+            sys.process(pid).and_then(|p| p.parent()).and_then(|ppid| {
+                sys.process(ppid).map(|pp| {
+                    let pname = pp.name().to_string_lossy().to_lowercase();
+                    pname.contains("wallpaper")
+                })
             })
-        })
-    }).unwrap_or(false);
+        }).unwrap_or(false)
+    });
 
     let we_dir = setup::find_wallpaper_engine_dir();
 
     // Plugins MUST be located in the same directory as scripts (ui/dist/scripts/plugins)
-    let scripts_dir = if exe_dir.join("scripts.js").exists() {
-        exe_dir.clone()
-    } else if exe_dir.ends_with("scripts") {
+    let scripts_dir = if exe_dir.join("scripts.js").exists() || exe_dir.ends_with("scripts") {
         exe_dir.clone()
     } else if we_dir.join("ui").join("dist").join("scripts").exists() {
         we_dir.join("ui").join("dist").join("scripts")
@@ -97,15 +122,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let has_silent_flag = args.iter().any(|a| a == "--silent" || a == "-s");
+    let has_uninstall_flag = args
+        .iter()
+        .any(|a| a == "--uninstall" || a == "-u" || a == "/uninstall");
+    if has_uninstall_flag {
+        setup::run_uninstall(has_silent_flag);
+        return Ok(());
+    }
     if has_silent_flag {
         setup::run_setup_mode(true);
         return Ok(());
-    }
-
-    // Clean up any lingering .old binary from previous update on startup
-    let old_exe = scripts_dir.join("wengine-helper.exe.old");
-    if old_exe.exists() {
-        let _ = std::fs::remove_file(&old_exe);
     }
 
     let is_daemon = has_daemon_flag || is_parent_we;
@@ -115,21 +141,79 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    logging::init(&scripts_dir);
+    log_info!(
+        "daemon starting: version={}, exe_dir={}, we_dir={}, scripts_dir={}",
+        env!("CARGO_PKG_VERSION"),
+        exe_dir.display(),
+        we_dir.display(),
+        scripts_dir.display()
+    );
+    if let Some(version) = setup::detect_we_version(&we_dir) {
+        log_info!("detected Wallpaper Engine {version}");
+    }
+
+    let http = http::build_client()?;
+    let api_token = api_security::load_token(&scripts_dir);
+    if api_token == api_security::TOKEN_PLACEHOLDER {
+        log_warn!("local API uses the development placeholder token; run the installer to generate a real token");
+    }
+
+    // Bind before touching persistent state: a second instance launched by the
+    // UI must not rewrite metadata/auth files or clean up while the first one
+    // is running.
+    let addr = SocketAddr::from(([127, 0, 0, 1], 43196));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => {
+            log_info!("listening on http://{addr}");
+            listener
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            if existing_instance_running(&http).await {
+                // The UI or the installer started a second process while the
+                // first one is healthy - exit quietly instead of crashing.
+                log_info!("another helper instance already serves {addr}; exiting");
+                return Ok(());
+            }
+            log_error!("address {addr} is occupied by another application: {e}");
+            std::process::exit(1);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // Clean up any lingering .old binary from a previous update.
+    let old_exe = scripts_dir.join("wengine-helper.exe.old");
+    if old_exe.exists() {
+        let _ = std::fs::remove_file(&old_exe);
+    }
+
     let plugins_dir = scripts_dir.join("plugins");
     let _ = std::fs::create_dir_all(&plugins_dir);
 
-    let auth = Arc::new(AuthManager::new(&exe_dir));
+    // All persistent state lives next to the patched UI, so a dev launch from
+    // `target/debug` and a production launch share the same data directory.
+    let auth = Arc::new(AuthManager::new(&scripts_dir, http.clone()));
     let client = Arc::new(SteamClient::new());
     let lifecycle = Arc::new(LifecycleManager::new());
-    let accounts = Arc::new(AccountsManager::new(&exe_dir));
+    let accounts = Arc::new(AccountsManager::new(&scripts_dir));
     let download = Arc::new(DownloadManager::new());
     let extract = Arc::new(ExtractManager::new());
-    let dotnet = Arc::new(DotnetManager::new(scripts_dir.clone()));
-    let plugins = Arc::new(PluginManager::new(plugins_dir, Arc::clone(&dotnet)));
+    let dotnet = Arc::new(DotnetManager::new(scripts_dir.clone(), http.clone()));
+    let plugins = Arc::new(PluginManager::new(
+        plugins_dir,
+        Arc::clone(&dotnet),
+        http.clone(),
+    ));
     let qr_download = Arc::new(accounts::QrDownloadAuthManager::new());
     let metadata = Arc::new(MetadataManager::new(&scripts_dir));
     metadata.clean_uninstalled(&we_dir);
-    let update = Arc::new(UpdateManager::new(exe_dir.clone(), we_dir.clone(), scripts_dir.clone()));
+    let update = Arc::new(UpdateManager::new(
+        exe_dir.clone(),
+        we_dir.clone(),
+        scripts_dir.clone(),
+        http.clone(),
+        api_token.clone(),
+    ));
     let browse_cache = Arc::new(RwLock::new(HashMap::new()));
     let workshop_cache = Arc::new(RwLock::new(HashMap::new()));
 
@@ -158,10 +242,7 @@ async fn main() -> anyhow::Result<()> {
         we_dir,
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = api_security::cors_layer();
 
     let app = Router::new()
         .route("/api/ping", get(handle_ping))
@@ -207,6 +288,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/workshop/extract", post(handle_workshop_extract))
         .route("/api/workshop/extract/status", get(handle_workshop_extract_status))
         .route("/api/workshop/delete", post(handle_workshop_delete))
+        .layer(middleware::from_fn(api_security::guard_request))
+        .layer(Extension(api_security::ApiToken(api_token.clone())))
         .layer(cors)
         .with_state(state.clone());
 
@@ -219,11 +302,25 @@ async fn main() -> anyhow::Result<()> {
         update_manager.check_for_updates(false, mock).await;
     });
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 43196));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// True when the port is owned by a healthy `wengine-helper` instance.
+async fn existing_instance_running(http: &reqwest::Client) -> bool {
+    match http
+        .get("http://127.0.0.1:43196/api/ping")
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(resp) => resp
+            .text()
+            .await
+            .map(|body| body.trim() == "pong")
+            .unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 async fn handle_ping() -> &'static str {
@@ -485,7 +582,10 @@ async fn handle_metadata_delete(
 
 // Workshop browse & item details
 fn make_browse_cache_key(query: &BrowseQuery) -> String {
-    let is_author = query.itemid.as_ref().map_or(false, |s| !s.trim().is_empty());
+    let is_author = query
+        .itemid
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty());
     let q_per_page = query.get_num_per_page();
     let per_page = if q_per_page > 0 {
         if is_author && q_per_page == 50 { 30 } else { q_per_page }
@@ -532,13 +632,13 @@ async fn fetch_browse_page(
             Ok(page)
         }
         Err(e) => {
-            eprintln!("[Worker] Browse auth error: {e}, retrying anonymously...");
+            log_warn!("browse auth error: {e}; retrying anonymously");
             match client.fetch_html(&url, anon_cookies).await {
                 Ok(anon_html) => {
                     let page = parser::parse_browse(&anon_html, query.page, query.token);
                     Ok(page)
                 }
-                Err(e2) => Err(e2.into()),
+                Err(e2) => Err(e2),
             }
         }
     }
@@ -636,7 +736,7 @@ async fn handle_workshop_browse(
             (StatusCode::OK, Json(serde_json::to_value(page).unwrap_or_default()))
         }
         Err(e) => {
-            eprintln!("[Worker] Browse error: {e}");
+            log_warn!("browse error: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -743,7 +843,7 @@ async fn handle_workshop_item(
             if let Some(cached) = state.metadata.get_item(clean_id) {
                 return (StatusCode::OK, Json(cached));
             }
-            eprintln!("[Worker] Item details error for {clean_id}: {e}");
+            log_warn!("item details error for {clean_id}: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
@@ -761,6 +861,13 @@ async fn handle_workshop_download(
     State(state): State<AppState>,
     Json(req): Json<DownloadReq>,
 ) -> Json<serde_json::Value> {
+    let pubfileid = match api_security::sanitize_pubfileid(&req.pubfileid) {
+        Some(id) => id,
+        None => {
+            return Json(serde_json::json!({ "ok": false, "error": "Invalid pubfileid" }));
+        }
+    };
+
     let depot_bin = match state.plugins.get_plugin_path("DepotDownloaderMod") {
         Some(p) => p,
         None => {
@@ -773,13 +880,13 @@ async fn handle_workshop_download(
     };
 
     match state.download.start(
-        req.pubfileid.clone(),
+        pubfileid.clone(),
         Arc::clone(&state.accounts),
         state.we_dir.clone(),
         depot_bin,
         state.dotnet.get_dotnet_root(),
     ).await {
-        Ok(_) => Json(serde_json::json!({ "ok": true, "pubfileid": req.pubfileid })),
+        Ok(_) => Json(serde_json::json!({ "ok": true, "pubfileid": pubfileid })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
 }
@@ -811,7 +918,10 @@ async fn handle_workshop_download_cancel(
     State(state): State<AppState>,
     Json(req): Json<CancelReq>,
 ) -> Json<serde_json::Value> {
-    let ok = state.download.cancel(&req.pubfileid, &state.we_dir).await;
+    let ok = match api_security::sanitize_pubfileid(&req.pubfileid) {
+        Some(pubfileid) => state.download.cancel(&pubfileid, &state.we_dir).await,
+        None => false,
+    };
     Json(serde_json::json!({ "ok": ok, "pubfileid": req.pubfileid }))
 }
 
@@ -837,19 +947,35 @@ async fn handle_workshop_extract(
         }
     };
 
-    let mut target_pid = req.pubfileid.clone().unwrap_or_default().trim().to_string();
+    let mut target_pid = req
+        .pubfileid
+        .as_deref()
+        .and_then(api_security::sanitize_pubfileid)
+        .unwrap_or_default();
     if target_pid.is_empty() {
         if let Some(ref f) = req.file {
-            let re = regex::Regex::new(r#"(?:myprojects|workshop)[/\\](\d+)"#).unwrap();
-            if let Some(caps) = re.captures(f) {
+            if let Some(caps) = WALLPAPER_PATH_ID_RE.captures(f) {
                 if let Some(m) = caps.get(1) {
-                    target_pid = m.as_str().to_string();
+                    target_pid = api_security::sanitize_pubfileid(m.as_str()).unwrap_or_default();
                 }
             }
         }
     }
 
-    let file_path = req.file.map(PathBuf::from);
+    // Only archives/directories from the Wallpaper Engine installation may be
+    // handed to the extractor; the output folder stays user-controlled.
+    let file_path = req.file.as_deref().and_then(|raw| {
+        api_security::resolve_readable_target(&state.we_dir, std::path::Path::new(raw))
+    });
+    if req.file.is_some() && file_path.is_none() {
+        if target_pid.is_empty() {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": "Refusing to extract from a path outside the Wallpaper Engine directory"
+            }));
+        }
+        log_warn!("extract: unusable file path ignored, using pubfileid {target_pid}");
+    }
     let output_dir = req.output_dir.map(PathBuf::from);
 
     match state.extract.start(
@@ -879,18 +1005,44 @@ struct DeleteWallpaperReq {
     file: Option<String>,
 }
 
+#[cfg(windows)]
+fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    // FILE_ATTRIBUTE_REPARSE_POINT covers symlinks, junctions and other links.
+    meta.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
+// Clearing the read-only attribute is the whole point here: Steam marks
+// workshop content read-only, and it must be removed before deletion.
+#[allow(clippy::permissions_set_readonly_false)]
 fn clean_readonly_and_remove_step(p: &std::path::Path) {
-    if !p.exists() {
+    let Ok(meta) = std::fs::symlink_metadata(p) else {
+        return;
+    };
+
+    // Never follow a link/junction: a wallpaper directory must not be able to
+    // reach outside of itself through a reparse point.
+    if is_reparse_point(&meta) {
+        if meta.file_type().is_dir() {
+            let _ = std::fs::remove_dir(p);
+        } else {
+            let _ = std::fs::remove_file(p);
+        }
         return;
     }
-    if let Ok(meta) = std::fs::symlink_metadata(p) {
-        let mut perms = meta.permissions();
-        if perms.readonly() {
-            perms.set_readonly(false);
-            let _ = std::fs::set_permissions(p, perms);
-        }
+
+    let mut perms = meta.permissions();
+    if perms.readonly() {
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(p, perms);
     }
-    if p.is_dir() {
+
+    if meta.file_type().is_dir() {
         if let Ok(entries) = std::fs::read_dir(p) {
             for entry in entries.flatten() {
                 clean_readonly_and_remove_step(&entry.path());
@@ -924,52 +1076,62 @@ async fn handle_workshop_delete(
     Json(req): Json<DeleteWallpaperReq>,
 ) -> Json<serde_json::Value> {
     let mut deleted = false;
-    let mut target_pid = req.pubfileid.clone().unwrap_or_default().trim().to_string();
+    let mut file_resolved = false;
+    let mut target_pid = req
+        .pubfileid
+        .as_deref()
+        .and_then(api_security::sanitize_pubfileid)
+        .unwrap_or_default();
 
     if target_pid.is_empty() {
         if let Some(ref f) = req.file {
-            let re = regex::Regex::new(r#"(?:myprojects|workshop)[/\\](\d+)"#).unwrap();
-            if let Some(caps) = re.captures(f) {
+            if let Some(caps) = WALLPAPER_PATH_ID_RE.captures(f) {
                 if let Some(m) = caps.get(1) {
-                    target_pid = m.as_str().to_string();
+                    target_pid = api_security::sanitize_pubfileid(m.as_str()).unwrap_or_default();
                 }
             }
         }
     }
 
     if let Some(ref file_path) = req.file {
-        let p = std::path::Path::new(file_path);
-        let abs_p = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            state.we_dir.join(p)
-        };
-        let dir = if abs_p.is_file() { abs_p.parent() } else { Some(abs_p.as_path()) };
-        if let Some(d) = dir {
-            if d.exists() && (d.join("project.json").exists() || d.join("preview.jpg").exists() || d.join("preview.gif").exists() || !target_pid.is_empty()) {
-                if clean_readonly_and_remove(d).await {
-                    deleted = true;
-                }
+        if let Some(d) = api_security::resolve_wallpaper_target(
+            &state.we_dir,
+            std::path::Path::new(file_path),
+        ) {
+            file_resolved = true;
+            if (d.join("project.json").exists()
+                || d.join("preview.jpg").exists()
+                || d.join("preview.gif").exists()
+                || !target_pid.is_empty())
+                && clean_readonly_and_remove(&d).await
+            {
+                deleted = true;
             }
         }
     }
 
     if !target_pid.is_empty() {
-        let candidates = [
-            state.we_dir.join("projects").join("myprojects").join(&target_pid),
-            state.we_dir.join("projects").join("defaultprojects").join(&target_pid),
-            state.we_dir.join("workshop").join("content").join("431960").join(&target_pid),
-        ];
+        let candidates = api_security::wallpaper_dirs(&state.we_dir, &target_pid);
         for cand in &candidates {
-            if cand.exists() {
-                if clean_readonly_and_remove(cand).await {
-                    deleted = true;
-                }
+            if cand.exists() && clean_readonly_and_remove(cand).await {
+                deleted = true;
             }
         }
         state.download.clear(&target_pid);
         state.extract.clear(&target_pid);
         state.metadata.remove_item(&target_pid);
+    }
+
+    if !deleted && target_pid.is_empty() && req.file.is_some() {
+        log_warn!("delete refused: {} is not a wallpaper path", req.file.as_deref().unwrap_or("?"));
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": if file_resolved {
+                "Failed to delete the wallpaper directory"
+            } else {
+                "Refusing to delete a path outside the Wallpaper Engine wallpaper folders"
+            }
+        }));
     }
 
     Json(serde_json::json!({ "ok": true, "deleted": deleted, "pubfileid": target_pid }))
@@ -1016,41 +1178,15 @@ async fn handle_steam_login_system(State(state): State<AppState>) -> Json<serde_
 }
 
 async fn handle_dialog_folder() -> Json<serde_json::Value> {
-    let result = tokio::task::spawn_blocking(|| {
-        let ps_script = r#"
-            [System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null
-            $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-            $dialog.Description = 'Select extraction folder'
-            $dialog.ShowNewFolderButton = $true
-            if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-                [Console]::Out.Write($dialog.SelectedPath)
-            }
-        "#;
-        let mut cmd = std::process::Command::new("powershell");
-        cmd.args(["-NoProfile", "-STA", "-Command", ps_script]);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        match cmd.output() {
-            Ok(out) => {
-                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if path.is_empty() {
-                    None
-                } else {
-                    Some(path)
-                }
-            }
-            Err(_) => None,
-        }
-    })
-    .await
-    .unwrap_or(None);
+    let picked = tokio::task::spawn_blocking(|| dialog::pick_folder("Select extraction folder"))
+        .await
+        .unwrap_or(None);
 
-    match result {
-        Some(path) => Json(serde_json::json!({ "ok": true, "path": path })),
+    match picked {
+        Some(path) => Json(serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+        })),
         None => Json(serde_json::json!({ "ok": false, "cancelled": true })),
     }
 }

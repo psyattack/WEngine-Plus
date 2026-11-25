@@ -52,10 +52,15 @@ pub struct PluginManager {
     dotnet: Arc<crate::services::dotnet::DotnetManager>,
     status: Arc<RwLock<PluginStatus>>,
     is_working: Arc<AtomicBool>,
+    http: reqwest::Client,
 }
 
 impl PluginManager {
-    pub fn new(plugins_dir: PathBuf, dotnet: Arc<crate::services::dotnet::DotnetManager>) -> Self {
+    pub fn new(
+        plugins_dir: PathBuf,
+        dotnet: Arc<crate::services::dotnet::DotnetManager>,
+        http: reqwest::Client,
+    ) -> Self {
         let depot_ready = is_plugin_installed(&plugins_dir, &PLUGINS[0]);
         let repkg_ready = is_plugin_installed(&plugins_dir, &PLUGINS[1]);
         let dotnet_ready = dotnet.is_ready();
@@ -82,6 +87,7 @@ impl PluginManager {
             dotnet,
             status: Arc::new(RwLock::new(status)),
             is_working: Arc::new(AtomicBool::new(false)),
+            http,
         }
     }
 
@@ -201,11 +207,12 @@ impl PluginManager {
         let archive_ext = if plugin.is_zip { "zip" } else { "rar" };
         let archive_path = self.plugins_dir.join(format!("{}.{}", plugin.id, archive_ext));
 
-        let client = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .build()?;
-
-        let mut response = client.get(plugin.download_url).send().await?;
+        let mut response = self
+            .http
+            .get(plugin.download_url)
+            .header(reqwest::header::USER_AGENT, crate::http::BROWSER_UA)
+            .send()
+            .await?;
         if !response.status().is_success() {
             anyhow::bail!("Failed to download {}: HTTP {}", plugin.name, response.status());
         }
@@ -298,7 +305,7 @@ fn extract_zip(
             continue;
         }
 
-        let raw_path = file.name().replace('\\', "/");
+        let raw_path = file.name()?.replace('\\', "/");
         let clean_path = raw_path.trim_start_matches('/');
 
         let rel_path_str = if let Some(ref prefix) = norm_strip_prefix {

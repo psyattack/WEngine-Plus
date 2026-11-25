@@ -1,0 +1,27 @@
+# WEngine-Plus stores every text file with LF line endings in the repository and
+# in the working tree. Keeping checkouts on LF means the committed bytes are exactly
+# what the Rust compiler, the browser and CI see, and CRLF/LF churn never shows up
+# in diffs. The overlay is a classic script, so its line endings are irrelevant at
+# runtime.
+* text=auto eol=lf
+
+# Binary assets: never convert these between text and binary.
+*.ico binary
+*.png binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.exe binary
+*.dll binary
+*.zip binary
+*.rar binary
+*.7z binary
+*.tar binary
+*.gz binary
+*.xz binary
+*.bz2 binary
+*.lnk binary
+
+# The vector logo is XML, so keep it text and diffable.
+*.svg text eol=lf

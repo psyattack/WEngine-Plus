@@ -1,5 +1,7 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
 use parking_lot::RwLock;
 
 pub struct MetadataManager {
@@ -43,7 +45,7 @@ impl MetadataManager {
         }
         let mut guard = self.data.write();
         guard.insert(clean.to_string(), item);
-        let _ = self.save(&guard);
+        Self::persist(&self.storage_path, &guard);
     }
 
     pub fn remove_item(&self, pubfileid: &str) -> bool {
@@ -54,7 +56,7 @@ impl MetadataManager {
         let mut guard = self.data.write();
         let removed = guard.remove(clean).is_some();
         if removed {
-            let _ = self.save(&guard);
+            Self::persist(&self.storage_path, &guard);
         }
         removed
     }
@@ -67,7 +69,7 @@ impl MetadataManager {
                 guard.insert(clean, v);
             }
         }
-        let _ = self.save(&guard);
+        Self::persist(&self.storage_path, &guard);
     }
 
     pub fn clean_uninstalled(&self, we_dir: &Path) {
@@ -75,28 +77,50 @@ impl MetadataManager {
         let initial_len = guard.len();
         guard.retain(|id, _| {
             let clean = id.trim();
-            if clean.is_empty() {
-                return false;
-            }
-            if we_dir.join("projects").join("myprojects").join(clean).exists() {
-                return true;
-            }
-            if we_dir.join("projects").join("defaultprojects").join(clean).exists() {
-                return true;
-            }
-            if we_dir.join("workshop").join("content").join("431960").join(clean).exists() {
-                return true;
-            }
-            false
+            !clean.is_empty() && crate::api_security::is_installed_wallpaper(we_dir, clean)
         });
         if guard.len() != initial_len {
-            let _ = self.save(&guard);
+            Self::persist(&self.storage_path, &guard);
         }
     }
 
-    fn save(&self, map: &serde_json::Map<String, serde_json::Value>) -> anyhow::Result<()> {
+    /// Writes the map through a temporary file so a crash cannot leave a
+    /// truncated `metadata.json` behind (`fs::rename` replaces files on
+    /// Windows). Errors are logged instead of being silently dropped.
+    fn persist(
+        storage_path: &Path,
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        if let Err(e) = Self::save(storage_path, map) {
+            log_error!("failed to persist metadata.json: {e}");
+        }
+    }
+
+    fn save(
+        storage_path: &Path,
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> anyhow::Result<()> {
         let json_str = serde_json::to_string_pretty(&serde_json::Value::Object(map.clone()))?;
-        std::fs::write(&self.storage_path, &json_str)?;
+        let tmp_path = storage_path.with_file_name(format!(
+            "metadata.json.tmp.{}",
+            std::process::id()
+        ));
+
+        let written = (|| -> anyhow::Result<()> {
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(json_str.as_bytes())?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+
+        if let Err(e) = std::fs::rename(&tmp_path, storage_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
         Ok(())
     }
 }

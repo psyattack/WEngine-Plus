@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Flat two-tone mark: warm off-black tile, warm off-white W and plus. No gradients. -->
+  <rect width="1024" height="1024" rx="232" fill="#111111"/>
+
+  <path d="M143 360 L305 680 L437 520 L569 680 L731 360"
+        fill="none" stroke="#F7F6F3" stroke-width="96"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <path d="M825 536 V664 M761 600 H889"
+        fill="none" stroke="#F7F6F3" stroke-width="80"
+        stroke-linecap="round"/>
+</svg>

@@ -10,6 +10,9 @@ use tokio::process::Command;
 
 use super::download::Phase;
 
+static EXTRACT_ID_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| regex::Regex::new(r"(\d{6,})").expect("extract id regex"));
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractStatus {
     pub pubfileid: String,
@@ -56,8 +59,14 @@ impl ExtractManager {
         repkg_path: PathBuf,
         dotnet_root: Option<PathBuf>,
     ) -> anyhow::Result<()> {
-        let task_id = if !pubfileid.trim().is_empty() {
-            pubfileid.trim().to_string()
+        let pubfileid = if pubfileid.trim().is_empty() {
+            String::new()
+        } else {
+            crate::api_security::sanitize_pubfileid(&pubfileid)
+                .ok_or_else(|| anyhow::anyhow!("Invalid pubfileid"))?
+        };
+        let task_id = if !pubfileid.is_empty() {
+            pubfileid.clone()
         } else if let Some(ref fp) = file_path {
             fp.to_string_lossy().to_string()
         } else {
@@ -116,12 +125,8 @@ impl ExtractManager {
             }
         }
 
-        if pkg_file.is_none() && !pubfileid.trim().is_empty() {
-            let candidates = [
-                we_dir.join("projects").join("myprojects").join(&pubfileid),
-                we_dir.join("projects").join("defaultprojects").join(&pubfileid),
-                we_dir.join("workshop").join("content").join("431960").join(&pubfileid),
-            ];
+        if pkg_file.is_none() && !pubfileid.is_empty() {
+            let candidates = crate::api_security::wallpaper_dirs(&we_dir, &pubfileid);
             for cand in &candidates {
                 if cand.exists() {
                     if let Some(pkg) = find_pkg_in_dir(cand) {
@@ -141,7 +146,7 @@ impl ExtractManager {
             pubfileid.trim().to_string()
         } else if let Some(ref fp) = file_path {
             let fp_str = fp.to_string_lossy();
-            if let Some(caps) = regex::Regex::new(r"(\d{6,})").ok().and_then(|re| re.captures(&fp_str)) {
+            if let Some(caps) = EXTRACT_ID_RE.captures(&fp_str) {
                 caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "extracted".to_string())
             } else {
                 fp.parent()

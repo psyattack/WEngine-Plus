@@ -1,9 +1,45 @@
 use std::collections::HashMap;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use serde_json::Value;
 
 use super::types::{WorkshopItem, WorkshopPage};
+
+static RE_QUERIES: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?s)queries"\s*:\s*"((?:\\.|[^"\\])*)""#).expect("queries regex"));
+static RE_AUTHOR_PREFIX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^\s*(?:by|collection\s+by)\s+").expect("author prefix regex"));
+static RE_AUTHOR_BY_LINK: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"<a href="(https://steamcommunity\.com/(?:id|profiles)/[^"]+/(?:myworkshopfiles|myworkshopcollections)/[^"]*)"[^>]*>By\s+([^<]+)</a>"#,
+    )
+    .expect("author link regex")
+});
+static RE_FILEDETAILS_ID: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"filedetails/\?id=(\d+)"#).expect("filedetails id regex"));
+static RE_ELLIPSIS_LAST: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"<div>\.\.\.</div><div[^>]*class="[^"]*Panel[^"]*"[^>]*tabindex="0"[^>]*role="button"[^>]*>\s*([\d,]+)\s*</div>"#,
+    )
+    .expect("ellipsis pagination regex")
+});
+static RE_TOTAL_AFTER_RANGE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?:Showing|Отображаются?)\s+\d+[\s\-–]\d+\s+(?:of|из)\s+([\d,.\s]+)"#)
+        .expect("total items regex")
+});
+static RE_TOTAL_RANGE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?:Showing|Отображаются?)\s+(\d+)[\s\-–](\d+)\s+(?:of|из)\s+([\d,.\s]+)"#)
+        .expect("total items range regex")
+});
+static RE_PAGELINK: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"class="pagelink"[^>]*>\s*(\d+)\s*<"#).expect("pagelink regex"));
+static RE_PAGE_CURRENT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"class="page_current"[^>]*>\s*(\d+)\s*<"#).expect("page current regex"));
+static RE_QUERY_ID: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"[?&]id=(\d+)"#).expect("query id regex"));
+static RE_PROFILE_ID: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"/profiles/(\d+)"#).expect("profile id regex"));
 
 pub fn parse_browse(html: &str, _current_page: u32, token: u64) -> WorkshopPage {
     let doc = Html::parse_document(html);
@@ -136,8 +172,7 @@ fn parse_browse_ssr(html: &str) -> (Vec<WorkshopItem>, Option<(u32, u64)>) {
     }
 
     if queries_array.is_none() {
-        let re_queries = Regex::new(r#"(?s)queries"\s*:\s*"((?:\\.|[^"\\])*)""#).unwrap();
-        if let Some(cap) = re_queries.captures(html) {
+        if let Some(cap) = RE_QUERIES.captures(html) {
             let raw = cap[1].replace(r"\\", r"\");
             let unescaped = unescape_json_string(&raw);
             if let Ok(val) = serde_json::from_str::<Value>(&unescaped) {
@@ -369,7 +404,6 @@ fn parse_browse_html(doc: &Html) -> Vec<WorkshopItem> {
     )
     .unwrap();
     let author_text_sel = Selector::parse(".workshopItemAuthorName").unwrap();
-    let author_re = Regex::new(r"(?i)^\s*(?:by|collection\s+by)\s+").unwrap();
 
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -431,14 +465,14 @@ fn parse_browse_html(doc: &Html) -> Vec<WorkshopItem> {
 
         if let Some(a) = tile.select(&author_link_sel).next() {
             let raw = inner_text(a);
-            item.author = author_re.replace(&raw, "").trim().to_string();
+            item.author = RE_AUTHOR_PREFIX.replace(&raw, "").trim().to_string();
             item.author_url = a.value().attr("href").unwrap_or("").to_string();
             if let Some(sid) = extract_steamid(&item.author_url) {
                 item.authorsteamid = sid;
             }
         } else if let Some(span) = tile.select(&author_text_sel).next() {
             let raw = inner_text(span);
-            item.author = author_re.replace(&raw, "").trim().to_string();
+            item.author = RE_AUTHOR_PREFIX.replace(&raw, "").trim().to_string();
         }
 
         items.push(item);
@@ -488,17 +522,12 @@ fn parse_browse_loose(doc: &Html, html: &str) -> Vec<WorkshopItem> {
         }
     }
 
-    let author_re = Regex::new(
-        r#"<a href="(https://steamcommunity\.com/(?:id|profiles)/[^"]+/(?:myworkshopfiles|myworkshopcollections)/[^"]*)"[^>]*>By\s+([^<]+)</a>"#,
-    )
-    .unwrap();
-    let id_re = Regex::new(r#"filedetails/\?id=(\d+)"#).unwrap();
-    let id_positions: Vec<(String, usize)> = id_re
+    let id_positions: Vec<(String, usize)> = RE_FILEDETAILS_ID
         .captures_iter(html)
         .map(|c| (c[1].to_string(), c.get(0).unwrap().start()))
         .collect();
 
-    for cap in author_re.captures_iter(html) {
+    for cap in RE_AUTHOR_BY_LINK.captures_iter(html) {
         let start = cap.get(0).unwrap().start();
         let url = cap[1].to_string();
         let name = cap[2].trim().to_string();
@@ -531,18 +560,10 @@ fn parse_browse_loose(doc: &Html, html: &str) -> Vec<WorkshopItem> {
 }
 
 fn parse_pagination(doc: &Html, html: &str, items: &[WorkshopItem]) -> (u32, u64) {
-    let re_ellipsis_last = Regex::new(
-        r#"<div>\.\.\.</div><div[^>]*class="[^"]*Panel[^"]*"[^>]*tabindex="0"[^>]*role="button"[^>]*>\s*([\d,]+)\s*</div>"#
-    ).unwrap();
-
-    let last_match = re_ellipsis_last.captures_iter(html).last();
+    let last_match = RE_ELLIPSIS_LAST.captures_iter(html).last();
     if let Some(cap) = last_match {
         if let Ok(max) = cap[1].replace(',', "").parse::<u32>() {
-            let re_total = Regex::new(
-                r#"(?:Showing|Отображаются?)\s+\d+[\s\-–]\d+\s+(?:of|из)\s+([\d,.\s]+)"#,
-            )
-            .unwrap();
-            let total_items = re_total
+            let total_items = RE_TOTAL_AFTER_RANGE
                 .captures(html)
                 .and_then(|cap| cap[1].replace([',', '.', ' '], "").parse::<u64>().ok())
                 .unwrap_or_else(|| {
@@ -553,10 +574,7 @@ fn parse_pagination(doc: &Html, html: &str, items: &[WorkshopItem]) -> (u32, u64
         }
     }
 
-    let re_total =
-        Regex::new(r#"(?:Showing|Отображаются?)\s+(\d+)[\s\-–](\d+)\s+(?:of|из)\s+([\d,.\s]+)"#)
-            .unwrap();
-    if let Some(cap) = re_total.captures(html) {
+    if let Some(cap) = RE_TOTAL_RANGE.captures(html) {
         let start: u64 = cap[1].replace([',', '.', ' '], "").parse().unwrap_or(0);
         let end: u64 = cap[2].replace([',', '.', ' '], "").parse().unwrap_or(0);
         let total: u64 = cap[3].replace([',', '.', ' '], "").parse().unwrap_or(0);
@@ -582,14 +600,11 @@ fn parse_pagination(doc: &Html, html: &str, items: &[WorkshopItem]) -> (u32, u64
         }
     }
 
-    let re_pages_1 = Regex::new(r#"class="pagelink"[^>]*>\s*(\d+)\s*<"#).unwrap();
-    let re_pages_2 = Regex::new(r#"class="page_current"[^>]*>\s*(\d+)\s*<"#).unwrap();
-
-    let max_page_1 = re_pages_1
+    let max_page_1 = RE_PAGELINK
         .captures_iter(html)
         .filter_map(|c| c[1].parse::<u32>().ok())
         .max();
-    let max_page_2 = re_pages_2
+    let max_page_2 = RE_PAGE_CURRENT
         .captures_iter(html)
         .filter_map(|c| c[1].parse::<u32>().ok())
         .max();
@@ -607,13 +622,11 @@ fn parse_pagination(doc: &Html, html: &str, items: &[WorkshopItem]) -> (u32, u64
 }
 
 fn extract_pubfileid(href: &str) -> Option<String> {
-    let re = Regex::new(r#"[?&]id=(\d+)"#).unwrap();
-    re.captures(href).map(|c| c[1].to_string())
+    RE_QUERY_ID.captures(href).map(|c| c[1].to_string())
 }
 
 fn extract_steamid(href: &str) -> Option<String> {
-    let re = Regex::new(r#"/profiles/(\d+)"#).unwrap();
-    re.captures(href).map(|c| c[1].to_string())
+    RE_PROFILE_ID.captures(href).map(|c| c[1].to_string())
 }
 
 fn inner_text(el: ElementRef<'_>) -> String {
@@ -731,8 +744,7 @@ pub fn parse_item_details(html: &str, pubfileid: &str) -> WorkshopItem {
         let author_name_sel = Selector::parse(".workshopItemAuthorName").unwrap();
         if let Some(el) = doc.select(&author_name_sel).next() {
             let raw = inner_text(el);
-            let re = Regex::new(r"(?i)^\s*(?:by|collection\s+by)\s+").unwrap();
-            item.author = re.replace(&raw, "").trim().to_string();
+            item.author = RE_AUTHOR_PREFIX.replace(&raw, "").trim().to_string();
         }
     }
 
@@ -838,6 +850,68 @@ pub fn parse_item_details(html: &str, pubfileid: &str) -> WorkshopItem {
     item.typelabel = item.item_type.clone();
 
     item
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_doc() -> Html {
+        Html::parse_document("<html><body></body></html>")
+    }
+
+    #[test]
+    fn parses_pagination_from_showing_range() {
+        let (max_page, total) =
+            parse_pagination(&empty_doc(), "Showing 1-30 of 1,234 items", &[]);
+        assert_eq!(total, 1234);
+        assert_eq!(max_page, 42);
+    }
+
+    #[test]
+    fn prefers_ellipsis_last_page() {
+        let html = r#"<div>...</div><div class="Panel" tabindex="0" role="button"> 99 </div> Showing 1-30 of 2,970 entries"#;
+        let (max_page, total) = parse_pagination(&empty_doc(), html, &[]);
+        assert_eq!(max_page, 99);
+        assert_eq!(total, 2970);
+    }
+
+    #[test]
+    fn falls_back_to_page_links() {
+        let html = r#"<a class="pagelink">2</a><a class="pagelink">7</a><span class="page_current">3</span>"#;
+        let (max_page, _) = parse_pagination(&empty_doc(), html, &[]);
+        assert_eq!(max_page, 7);
+    }
+
+    #[test]
+    fn extracts_ids_from_workshop_links() {
+        assert_eq!(
+            extract_pubfileid("/sharedfiles/filedetails/?id=123456&searchtext=x"),
+            Some("123456".to_string())
+        );
+        assert_eq!(
+            extract_pubfileid("https://steamcommunity.com/sharedfiles/filedetails/?id=42"),
+            Some("42".to_string())
+        );
+        assert_eq!(
+            extract_pubfileid("https://steamcommunity.com/profiles/123"),
+            None
+        );
+        assert_eq!(
+            extract_steamid("https://steamcommunity.com/profiles/76561198000000000/myworkshopfiles/"),
+            Some("76561198000000000".to_string())
+        );
+        assert_eq!(
+            extract_steamid("https://steamcommunity.com/id/someone/"),
+            None
+        );
+    }
+
+    #[test]
+    fn unescapes_ssr_json_strings() {
+        assert_eq!(unescape_json_string(r#"a\"b\\c\nd\u0041"#), "a\"b\\c\ndA");
+        assert_eq!(unescape_json_string("plain"), "plain");
+    }
 }
 
 

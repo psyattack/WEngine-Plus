@@ -9,6 +9,12 @@ use tokio::io::AsyncWriteExt;
 
 const GITHUB_API_LATEST: &str = "https://api.github.com/repos/psyattack/WEngine-Plus/releases/latest";
 
+/// The daemon's own API. Mock release endpoints live there and require the client token, unlike
+/// GitHub, which must never receive it.
+fn is_local_api(url: &str) -> bool {
+    url.starts_with("http://127.0.0.1:43196")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateStatus {
@@ -48,12 +54,12 @@ struct GithubRelease {
 }
 
 pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let clean = v.trim().trim_start_matches(|c| c == 'v' || c == 'V');
+    let clean = v.trim().trim_start_matches(['v', 'V']);
     let parts: Vec<&str> = clean.split('.').collect();
     if parts.is_empty() {
         return None;
     }
-    let major = parts.get(0)?.parse().ok()?;
+    let major = parts.first()?.parse().ok()?;
     let minor = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
     let patch = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
     Some((major, minor, patch))
@@ -63,8 +69,8 @@ pub fn is_newer_version(latest_tag: &str, current_ver: &str) -> bool {
     match (parse_version(latest_tag), parse_version(current_ver)) {
         (Some(l), Some(c)) => l > c,
         _ => {
-            let l_clean = latest_tag.trim().trim_start_matches(|c| c == 'v' || c == 'V');
-            let c_clean = current_ver.trim().trim_start_matches(|c| c == 'v' || c == 'V');
+            let l_clean = latest_tag.trim().trim_start_matches(['v', 'V']);
+            let c_clean = current_ver.trim().trim_start_matches(['v', 'V']);
             !l_clean.is_empty() && l_clean != c_clean
         }
     }
@@ -78,10 +84,19 @@ pub struct UpdateManager {
     info: Arc<RwLock<UpdateInfo>>,
     is_busy: Arc<AtomicBool>,
     last_check: Arc<RwLock<Option<Instant>>>,
+    http: reqwest::Client,
+    /// Token used when the update source is the daemon's own mock endpoints.
+    api_token: String,
 }
 
 impl UpdateManager {
-    pub fn new(exe_dir: PathBuf, we_dir: PathBuf, scripts_dir: PathBuf) -> Self {
+    pub fn new(
+        exe_dir: PathBuf,
+        we_dir: PathBuf,
+        scripts_dir: PathBuf,
+        http: reqwest::Client,
+        api_token: String,
+    ) -> Self {
         let current_version = env!("CARGO_PKG_VERSION").to_string();
         let info = UpdateInfo {
             current_version,
@@ -102,6 +117,8 @@ impl UpdateManager {
             info: Arc::new(RwLock::new(info)),
             is_busy: Arc::new(AtomicBool::new(false)),
             last_check: Arc::new(RwLock::new(None)),
+            http,
+            api_token,
         }
     }
 
@@ -126,7 +143,6 @@ impl UpdateManager {
         }
 
         let current_ver = self.info.read().current_version.clone();
-        let user_agent = format!("WEngine-Plus/{}", current_ver);
 
         let is_mock = mock || std::env::var("WENGINE_MOCK_UPDATE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
         let api_url = if is_mock {
@@ -135,21 +151,15 @@ impl UpdateManager {
             std::env::var("WENGINE_UPDATE_URL").unwrap_or_else(|_| GITHUB_API_LATEST.to_string())
         };
 
-        let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .user_agent(&user_agent)
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                let mut guard = self.info.write();
-                guard.status = UpdateStatus::Error;
-                guard.error = Some(format!("Failed to build HTTP client: {}", e));
-                return guard.clone();
-            }
-        };
+        let mut request = self.http.get(&api_url).timeout(Duration::from_secs(15));
+        if is_local_api(&api_url) {
+            request = request.header(crate::api_security::CLIENT_HEADER, &self.api_token);
+        }
 
-        match client.get(&api_url).send().await {
+        match request
+            .send()
+            .await
+        {
             Ok(resp) => {
                 if !resp.status().is_success() {
                     let mut guard = self.info.write();
@@ -241,15 +251,11 @@ impl UpdateManager {
             guard.error = None;
         }
 
-        let current_ver = self.info.read().current_version.clone();
-        let user_agent = format!("WEngine-Plus/{}", current_ver);
-
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .user_agent(&user_agent)
-            .build()?;
-
-        let resp = client.get(url).send().await?;
+        let mut request = self.http.get(url).timeout(Duration::from_secs(300));
+        if is_local_api(url) {
+            request = request.header(crate::api_security::CLIENT_HEADER, &self.api_token);
+        }
+        let resp = request.send().await?;
         if !resp.status().is_success() {
             anyhow::bail!("Failed to download update binary: HTTP {}", resp.status());
         }
@@ -334,7 +340,7 @@ impl UpdateManager {
             if rename_ok {
                 // Move .update to target_exe
                 if let Err(e) = std::fs::rename(&update_file, &target_exe) {
-                    eprintln!("Failed to move update to target: {}", e);
+                    log_error!("failed to move update into place: {e}");
                     let _ = std::fs::rename(&old_exe, &target_exe);
                     return;
                 }

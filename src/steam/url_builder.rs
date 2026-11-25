@@ -161,3 +161,91 @@ pub fn build_browse_url(query: &BrowseQuery) -> String {
 
     format!("{base_url}?{}", serializer.finish())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_query() -> BrowseQuery {
+        BrowseQuery {
+            page: 1,
+            sort: "trend".to_string(),
+            text: String::new(),
+            required_tags: None,
+            excluded_tags: None,
+            required_flags: None,
+            incompatible: None,
+            itemid: None,
+            preset: None,
+            token: 0,
+            num_per_page: 50,
+            numperpage: None,
+        }
+    }
+
+    #[test]
+    fn default_browse_url_targets_workshop() {
+        let url = build_browse_url(&base_query());
+        assert!(url.starts_with("https://steamcommunity.com/workshop/browse/?"));
+        for expected in [
+            "appid=431960",
+            "browsesort=trend",
+            "actualsort=trend",
+            "days=7",
+            "num_per_page=50",
+            "section=readytouseitems",
+        ] {
+            assert!(url.contains(expected), "missing {expected} in {url}");
+        }
+    }
+
+    #[test]
+    fn clamps_page_to_one() {
+        let mut query = base_query();
+        query.page = 0;
+        assert!(build_browse_url(&query).contains("p=1"));
+    }
+
+    #[test]
+    fn encodes_search_and_tags() {
+        let mut query = base_query();
+        query.text = "  \"night city\"  ".to_string();
+        query.required_tags = Some("Anime, Sci-Fi".to_string());
+        query.excluded_tags = Some("Cartoon".to_string());
+        query.incompatible = Some(true);
+
+        let url = build_browse_url(&query);
+        for expected in [
+            "searchtext=night+city",
+            "search_text_mode=1",
+            "requiredtags%5B%5D=Anime",
+            "excludedtags%5B%5D=Cartoon",
+            "requiredflags%5B%5D=incompatible",
+        ] {
+            assert!(url.contains(expected), "missing {expected} in {url}");
+        }
+    }
+
+    #[test]
+    fn author_query_uses_profile_page() {
+        let mut query = base_query();
+        query.itemid = Some("76561198000000000".to_string());
+
+        let url = build_browse_url(&query);
+        assert!(url.starts_with(
+            "https://steamcommunity.com/profiles/76561198000000000/myworkshopfiles/?"
+        ));
+        assert!(url.contains("numperpage=30"), "{url}");
+        assert!(!url.contains("section="), "{url}");
+    }
+
+    #[test]
+    fn preset_returns_filedetails() {
+        let mut query = base_query();
+        query.preset = Some("123456789".to_string());
+        assert_eq!(
+            build_browse_url(&query),
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=123456789"
+        );
+    }
+}
