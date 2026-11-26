@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.1.0](https://github.com/psyattack/WEngine-Plus/compare/v2.0.0...v2.1.0) - 2026-11-26
+
+**Upgrading from 2.0.0 or older:** download `WEngine-Plus-v2.1.0-Windows-x64.zip`, extract it and run `wengine-helper.exe` once. Those versions look for a standalone executable in the release and can no longer update themselves automatically; from this version on the in-app update works again.
+
+### Changed
+- Releases are distributed as a single `WEngine-Plus-v<version>-Windows-x64.zip` archive: extract it and run `wengine-helper.exe`.
+- The updater now downloads that archive, checks the size and SHA-256 digest GitHub publishes for it, extracts the executable and only then applies it. A release without a digest is refused, and a corrupted or tampered download is never installed.
+- The daemon log is one `wengine-helper.log` file capped at 8 MiB instead of a rotated `.old` copy; at the limit the older half is dropped, so the newest entries stay available.
+
+### Fixed
+- Clicking the version chip in the title bar now always reaches the chip instead of opening the monitor selection panel underneath it.
+- Age-rating tags in Workshop listings are translated; a tag the dictionaries do not cover shows its English name instead of a raw internal key.
+
+<details><summary>Detailed Changelog</summary>
+
+### Added
+- **update:** publish a single zip asset and verify it before applying (by @psyattack in ffc68d5)
+- **logging:** cap the daemon log at a single 8 MiB file (by @psyattack in 8aa8f34)
+
+### Fixed
+- **ui:** keep titlebar update chip clicks off the monitor header (by @psyattack in 953a1b6)
+- **i18n:** translate age-rating workshop tags in tag labels (by @psyattack in a38c473)
+
+</details>
+
+
 ## [2.0.0](https://github.com/psyattack/WEngine-Plus/compare/v1.4.0...v2.0.0) - 2026-11-25
 
 ### Added
