@@ -78,9 +78,9 @@ jobs:
               throw "Release executable not found at $exe"
           }
 
-          # The in-app updater downloads this exact asset and accepts only files that are at least
-          # 1 MiB and start with the PE "MZ" signature. Fail here instead of publishing an asset
-          # the updater would reject.
+          # The in-app updater downloads the zip asset, checks the size and the SHA-256 digest
+          # published by the GitHub API, and refuses a release without a digest. Publish exactly
+          # one .zip asset; the loose executable is not needed for updates anymore.
           $length = (Get-Item $exe).Length
           $header = [System.IO.File]::ReadAllBytes($exe)[0..1]
           if ($length -lt 1MB) {
@@ -90,7 +90,6 @@ jobs:
               throw 'Executable does not start with the MZ signature'
           }
 
-          Copy-Item $exe (Join-Path $distDir 'wengine-helper.exe')
           Compress-Archive -Path $exe, 'README.md', 'LICENSE', 'NOTICES.md' `
               -DestinationPath (Join-Path $distDir "WEngine-Plus-v$ver-Windows-x64.zip") -Force
 

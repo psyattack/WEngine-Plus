@@ -68,14 +68,15 @@ If the installer reports that neither `scripts.js` nor `scripts.js.bak` is prist
 ### How do I update WEngine-Plus?
 
 The version chip in the Wallpaper Engine title bar checks GitHub Releases. When a newer release
-exists it offers an update: the daemon downloads `wengine-helper.exe` to
-`wengine-helper.exe.update`, validates it, and on apply replaces itself and runs the new binary with
-`--silent`. That patching step restarts Wallpaper Engine and starts the new daemon.
+exists it offers an update: the daemon downloads the release zip to
+`wengine-helper.exe.update.zip`, verifies its size and the SHA-256 digest published by GitHub,
+extracts `wengine-helper.exe`, and on apply replaces itself and runs the new binary with `--silent`.
+That patching step restarts Wallpaper Engine and starts the new daemon.
 
-You can also download the latest release and run it manually; the installer overwrites the previous
-copy. The automatic updater does not verify a signature or a published digest — only the file size
-and the Windows `MZ` header. If you need stronger guarantees, download a release archive and compare
-it with `SHA256SUMS.txt` before running it.
+You can also download the latest release zip, extract it and run the executable manually; the
+installer overwrites the previous copy. The automatic updater does not verify a signature, but it
+does verify the SHA-256 digest GitHub publishes for the release asset and refuses an asset without
+one. If you need an independent check, compare the archive with `SHA256SUMS.txt` before running it.
 
 ### What does the Wallpaper Engine version warning mean?
 

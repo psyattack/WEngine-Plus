@@ -181,10 +181,12 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    // Clean up any lingering .old binary from a previous update.
-    let old_exe = scripts_dir.join("wengine-helper.exe.old");
-    if old_exe.exists() {
-        let _ = std::fs::remove_file(&old_exe);
+    // Clean up any lingering update leftovers from a previous attempt.
+    for name in ["wengine-helper.exe.old", "wengine-helper.exe.update.zip"] {
+        let path = scripts_dir.join(name);
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     let plugins_dir = scripts_dir.join("plugins");
@@ -510,30 +512,81 @@ async fn handle_update_apply(State(state): State<AppState>) -> Json<serde_json::
     }
 }
 
+/// A zip archive with the running executable, served by the mock update endpoints so the whole
+/// check → download → verify → extract → apply path can be exercised without a GitHub release.
+struct MockUpdateArchive {
+    zip: Vec<u8>,
+    sha256: String,
+}
+
+static MOCK_UPDATE_ARCHIVE: Lazy<Option<MockUpdateArchive>> = Lazy::new(build_mock_update_archive);
+
+fn build_mock_update_archive() -> Option<MockUpdateArchive> {
+    let exe = std::env::current_exe().ok()?;
+    let bytes = std::fs::read(exe).ok()?;
+    build_mock_update_archive_from(&bytes)
+}
+
+fn build_mock_update_archive_from(bytes: &[u8]) -> Option<MockUpdateArchive> {
+    use std::io::Write as _;
+
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer.start_file("wengine-helper.exe", options).ok()?;
+    writer.write_all(bytes).ok()?;
+    let zip = writer.finish().ok()?.into_inner();
+
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(&zip);
+    let sha256 = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+
+    Some(MockUpdateArchive { zip, sha256 })
+}
+
+/// A mock release tag that is newer than the running build, so the UI offers the update.
+fn mock_release_tag() -> String {
+    let mut parts = env!("CARGO_PKG_VERSION").split('.');
+    let major: u64 = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    let minor: u64 = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    let patch: u64 = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    format!("v{major}.{minor}.{}", patch + 1)
+}
+
 async fn handle_update_mock_release() -> Json<serde_json::Value> {
+    let tag = mock_release_tag();
+    let assets = match MOCK_UPDATE_ARCHIVE.as_ref() {
+        Some(archive) => serde_json::json!([{
+            "name": format!("WEngine-Plus-{tag}-Windows-x64.zip"),
+            "browser_download_url": "http://127.0.0.1:43196/api/update/mock/binary",
+            "size": archive.zip.len(),
+            "digest": format!("sha256:{}", archive.sha256),
+        }]),
+        None => serde_json::json!([]),
+    };
     Json(serde_json::json!({
-        "tag_name": "v1.3.0-test",
-        "name": "WEngine-Plus v1.3.0-test (Local Test)",
+        "tag_name": tag,
+        "name": "WEngine-Plus mock (Local Test)",
         "body": "Local test update without GitHub push",
-        "assets": [{
-            "name": "wengine-helper.exe",
-            "browser_download_url": "http://127.0.0.1:43196/api/update/mock/binary"
-        }]
+        "assets": assets,
     }))
 }
 
 async fn handle_update_mock_binary() -> impl IntoResponse {
-    let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("wengine-helper.exe"));
-    match tokio::fs::read(&exe_path).await {
-        Ok(bytes) => (
+    match MOCK_UPDATE_ARCHIVE.as_ref() {
+        Some(archive) => (
             StatusCode::OK,
-            [("content-type", "application/octet-stream")],
-            bytes,
-        ).into_response(),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            format!("Executable file not found: {}", e),
-        ).into_response(),
+            [("content-type", "application/zip")],
+            archive.zip.clone(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("content-type", "text/plain")],
+            "Mock update archive is unavailable: the current executable could not be read"
+                .to_string(),
+        )
+            .into_response(),
     }
 }
 
@@ -1191,3 +1244,25 @@ async fn handle_dialog_folder() -> Json<serde_json::Value> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_update_archive_matches_its_digest() {
+        let archive =
+            build_mock_update_archive_from(b"MZmock executable").expect("zip building must work");
+
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(&archive.zip);
+        let expected: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(archive.sha256, expected);
+
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive.zip)).unwrap();
+        let mut entry = zip.by_name("wengine-helper.exe").unwrap();
+        let mut contents = Vec::new();
+        use std::io::Read as _;
+        entry.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"MZmock executable");
+    }
+}

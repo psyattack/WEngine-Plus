@@ -126,13 +126,14 @@ from a wallpaper folder.
 | `GET` | `/api/update/status` | — | `UpdateInfo` |
 | `POST` | `/api/update/download` | — | `{ "ok": true }` or `{ "ok": false, "error": … }` |
 | `POST` | `/api/update/apply` | — | `{ "ok": true }` or `{ "ok": false, "error": … }` |
-| `GET` | `/api/update/mock/release` | — | GitHub-release-shaped JSON serving the current executable |
-| `GET` | `/api/update/mock/binary` | — | The running executable as `application/octet-stream` |
+| `GET` | `/api/update/mock/release` | — | GitHub-release-shaped JSON serving a zip of the current executable |
+| `GET` | `/api/update/mock/binary` | — | A zip archive with the running executable as `application/zip` |
 
 A check is cached for 300 seconds unless `force=true`. Errors are reported inside `UpdateInfo`
-(`status: "error"` and an `error` message), not as an HTTP error. `download` fails while another
-update operation is in flight. `apply` requires a previously downloaded and validated
-`wengine-helper.exe.update`.
+(`status: "error"` and an `error` message), not as an HTTP error. A `download` validates the archive
+size and SHA-256 against the GitHub API digest before extracting `wengine-helper.exe.update` and
+fails while another update operation is in flight. `apply` requires a previously downloaded and
+validated `wengine-helper.exe.update`.
 
 The mock routes exist for local end-to-end testing and are guarded like every other route. Point
 `WENGINE_UPDATE_URL` at a release-shaped JSON document to test against a different source.

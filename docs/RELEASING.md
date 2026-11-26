@@ -85,19 +85,20 @@ too: the workflow aborts unless `GITHUB_REF_TYPE` is `tag` and the ref name equa
 2. The executable's `FileVersion` and `ProductVersion` resources are asserted to equal `<version>.0`
    before anything is packaged; a mismatch (for example a hand-edited `build.rs` version) aborts the
    release.
-3. `wengine-helper.exe` is copied to `dist_artifacts/` under its own name. **This exact asset is what
-   the in-app updater downloads** — it selects the first asset named `wengine-helper.exe` or ending
-   in `.exe`, so a release must not publish a second `.exe` asset.
-4. `WEngine-Plus-v<version>-Windows-x64.zip` contains the executable, `README.md`, `LICENSE` and
-   `NOTICES.md` for users who prefer an archive.
-5. `SHA256SUMS.txt`: lowercase SHA-256 hashes, one per artifact, sorted by file name.
-6. Release notes extracted from the first `CHANGELOG.md` section, with a generic fallback.
-7. A GitHub Release named `WEngine-Plus vX.Y.Z` with every file from `dist_artifacts/`.
+3. `WEngine-Plus-v<version>-Windows-x64.zip` contains `wengine-helper.exe`, `README.md`, `LICENSE`
+   and `NOTICES.md`. **This single `.zip` asset is what the in-app updater downloads**: it extracts
+   the executable and requires exactly one zip asset, so do not publish loose executables or a second
+   `.zip`.
+4. `SHA256SUMS.txt`: lowercase SHA-256 hashes, one per artifact, sorted by file name.
+5. Release notes extracted from the first `CHANGELOG.md` section, with a generic fallback.
+6. A GitHub Release named `WEngine-Plus vX.Y.Z` with every file from `dist_artifacts/`.
 
-The updater validates a downloaded executable only by size (`≥ 1 MiB`) and the `MZ` header. There is
-no signature check and no digest check in the application, which is why `SHA256SUMS.txt` is published
-for manual verification. Changing the asset name or adding a differently named executable breaks the
-automatic update path — the release check requires an `.exe` asset.
+The updater authenticates the archive with the `sha256:<hex>` digest and the `size` that the GitHub
+API reports for the asset, and refuses a release without a digest. It then extracts the executable,
+requires at least 1 MiB and the `MZ` header, and only then applies the update. There is no signature
+check; `SHA256SUMS.txt` remains for manual verification. Changing the archive shape (no
+`wengine-helper.exe` entry, more than one zip asset, or a missing digest) breaks the automatic update
+path.
 
 ## Documentation touch points
 

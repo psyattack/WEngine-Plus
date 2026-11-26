@@ -118,8 +118,8 @@ Steps in `run_setup_mode`:
    last line without a trailing newline. This makes uninstall a byte-exact reversal. Substitute
    `__WEP_TOKEN__` in both the base and the overlay, then write `scripts.js` and `wengine-plus.js`
    with retries for transient locks.
-8. Clean up `wengine-helper.exe.update` / `.old`, start `wengine-helper.exe --daemon` from the target
-   directory, and in silent mode restart Wallpaper Engine.
+8. Clean up `wengine-helper.exe.update` / `.update.zip` / `.old`, start `wengine-helper.exe --daemon`
+   from the target directory, and in silent mode restart Wallpaper Engine.
 
 Markers that identify an already patched frontend: `WengineHelper`, `WEP_API_TOKEN`, `WEP_LOCALES`
 and `wengine-plus.js`. They are the reason a UI update (which replaces `scripts.js` with a pristine
@@ -130,7 +130,7 @@ file) cannot break the uninstall path.
 `run_uninstall` stops helper processes, then restores the frontend by stripping the loader from the
 current `scripts.js` when the result has no WEP markers; otherwise it copies `scripts.js.bak` back.
 After a successful restore the backup is removed. It then deletes the files WEngine-Plus owns —
-`wengine-helper.exe.old`, `.update`, `wengine-plus.js`, `wengine-token`, the log file,
+`wengine-helper.exe.old`, `.update`, `.update.zip`, `wengine-plus.js`, `wengine-token`, the log file,
 `metadata.json`, `steam_session.json`, `download_accounts.json` — and the `plugins/` and `dotnet/`
 trees. The running executable cannot delete itself on Windows, so a detached PowerShell process waits
 for the process id and removes it.
@@ -332,12 +332,16 @@ and reports progress.
 
 `UpdateManager` polls `https://api.github.com/repos/psyattack/WEngine-Plus/releases/latest` (or
 `WENGINE_UPDATE_URL`). The check is cached for 300 seconds unless forced. A release is relevant when
-its `tag_name` is numerically newer than `CARGO_PKG_VERSION` and it has an asset named
-`wengine-helper.exe` or ending in `.exe`.
+its `tag_name` is numerically newer than `CARGO_PKG_VERSION` and it publishes exactly one `.zip`
+asset with a size and a `sha256:<hex>` digest in the GitHub API response.
 
-Downloading writes `wengine-helper.exe.update` next to the running executable and reports progress.
-Before it is offered as installable, the file must be at least 1 MiB and start with `MZ`; anything
-else is deleted and reported as an error. Applying the update:
+Downloading writes the archive to `wengine-helper.exe.update.zip` next to the running executable and
+reports progress. The archive is accepted only when the downloaded byte count matches the API `size`
+and the computed SHA-256 matches the API digest; a newer release without a digest is reported as a
+check error instead of an available update. The updater then reads the single `wengine-helper.exe`
+entry from the archive (the size limit applies to the bytes actually copied, and reading the entry to
+EOF verifies the zip CRC) into `wengine-helper.exe.update`, deletes the archive and requires at least
+1 MiB and an `MZ` header on the extracted file. Applying the update:
 
 1. Marks `IS_UPDATING` so the `wallpaperui.exe` watcher does not exit the daemon.
 2. Renames the running executable to `wengine-helper.exe.old`, moves the update into place and
@@ -346,13 +350,15 @@ else is deleted and reported as an error. Applying the update:
 3. If the rename fails (a common Windows lock), a detached PowerShell script waits for the process to
    exit and performs the same replacement.
 
-A stale `.old` file is deleted on the next daemon start. `WENGINE_MOCK_UPDATE=1` and the
-`/api/update/mock/release` + `/api/update/mock/binary` routes serve the running executable as a fake
-release, so the whole flow can be exercised without publishing anything.
+A stale `.old` file and a leftover `.update.zip` are deleted on the next daemon start.
+`WENGINE_MOCK_UPDATE=1` and the `/api/update/mock/release` + `/api/update/mock/binary` routes serve a
+zip archive with the running executable and its digest as a fake release, so the whole flow can be
+exercised without publishing anything.
 
 There is no code signing or publisher verification: the installer is a self-patching portable
-executable, and the update download is validated only by size and the PE `MZ` header. Users who need
-stronger guarantees should verify the release archive against `SHA256SUMS.txt` manually.
+executable, and the update archive is authenticated by the SHA-256 digest GitHub publishes for the
+release asset. Users who need an independent check can compare the archive with `SHA256SUMS.txt`
+manually.
 
 ## Frontend overlay
 
@@ -538,7 +544,8 @@ Conventions:
 The resource compiler (`rc.exe`) comes with the Windows SDK that ships with the MSVC build tools;
 `winres` locates it. The icon is authored as `assets/app.svg`; `assets/app.png` (1024 px) and
 `assets/app.ico` (16–256 px) are exports committed next to it. There is no code signing: releases are
-unsigned executables, and the updater validates a download only by size and the PE header.
+unsigned executables. The updater refuses a release without the SHA-256 digest GitHub publishes for
+the zip asset and verifies the downloaded size and digest before extracting the executable.
 
 ## Logging and diagnostics
 

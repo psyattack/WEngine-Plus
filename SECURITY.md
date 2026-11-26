@@ -50,8 +50,8 @@ Reports are especially useful for:
   `wengine-plus.js` and comparison;
 - the installer and patch lifecycle: pristine-base selection, loader injection, elevation through
   `runas`, self-deletion and the uninstaller;
-- the updater: release selection, asset download, size/header validation, self-replacement and the
-  silent install path;
+- the updater: release selection, zip download, size and SHA-256 digest verification, archive
+  extraction, self-replacement and the silent install path;
 - Steam authentication: QR, cookie and credentials flows, the stored `steam_session.json` and the
   handling of download-account passwords;
 - unintended disclosure of tokens, cookies, passwords or personal paths in logs, error messages or

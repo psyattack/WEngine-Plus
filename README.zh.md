@@ -95,8 +95,8 @@ flowchart LR
 * **下载账号** —— 可选择自定义账号、内置公共账号池或匿名访问。
 * **安全删除** —— 正在使用的壁纸受到保护，路径被限制在已知壁纸目录内，Steam 的只读文件会在
   删除前清理。
-* **自动更新** —— 标题栏中的版本组件检查 GitHub Releases，下载新的可执行文件、替换自身并重新
-  应用前端补丁。
+* **自动更新** —— 标题栏中的版本组件检查 GitHub Releases，下载发布压缩包、校验大小与 SHA-256、
+  解压新的可执行文件、替换自身并重新应用前端补丁。
 * **三种界面语言** —— WEngine-Plus 自有的字符串提供英语、俄语和简体中文；其余界面跟随
   Wallpaper Engine 的语言设置。
 
@@ -116,9 +116,9 @@ flowchart LR
 
 ### 最终用户
 
-1. 从 [**最新版本**](https://github.com/psyattack/WEngine-Plus/releases/latest) 下载
-   `wengine-helper.exe`。
-2. 运行它。安装程序会：
+1. 从 [**最新版本**](https://github.com/psyattack/WEngine-Plus/releases/latest) 下载并解压
+   `WEngine-Plus-v<version>-Windows-x64.zip`。
+2. 运行解压出的 `wengine-helper.exe`。安装程序会：
    - 通过运行中的进程、Steam 注册表和库目录或标准路径定位 Wallpaper Engine（最后才会弹出选择
      文件夹对话框）；
    - 将自身复制到 `<Wallpaper Engine>\ui\dist\scripts\wengine-helper.exe`；
@@ -166,9 +166,9 @@ node --check frontend/wengine-plus.js
 
 ## 更新与卸载
 
-Wallpaper Engine 标题栏中的版本组件会检查 GitHub Releases。发现新版本时，点击「更新」会下载并
-校验可执行文件、替换辅助服务、以静默模式运行新的安装程序，并关闭 Wallpaper Engine 界面以便应用
-补丁。也可以手动运行新下载的版本；会话、账号和元数据都会保留。
+Wallpaper Engine 标题栏中的版本组件会检查 GitHub Releases。发现新版本时，点击「更新」会下载发布
+压缩包、校验大小与 SHA-256、解压新的可执行文件、替换辅助服务、以静默模式运行新的安装程序，并关闭
+Wallpaper Engine 界面以便应用补丁。也可以手动运行下载的发布压缩包；会话、账号和元数据都会保留。
 
 卸载时请先关闭 Wallpaper Engine，然后运行 `wengine-helper.exe --uninstall`（`--silent` 可无人
 值守）。卸载程序会移除加载器行，或在无法清理时还原 `scripts.js.bak`，随后删除代码层、令牌、

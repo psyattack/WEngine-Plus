@@ -678,10 +678,15 @@ pub fn run_setup_mode(silent: bool) {
         if overlay_written { println!("OK"); } else { println!("FAILED"); }
     }
 
-    // 5. Clean up temporary files (.update and .old)
-    let update_file = target_dir.join("wengine-helper.exe.update");
-    if update_file.exists() {
-        let _ = fs::remove_file(&update_file);
+    // 5. Clean up temporary files (.update, .update.zip and .old)
+    for update_name in [
+        "wengine-helper.exe.update",
+        "wengine-helper.exe.update.zip",
+    ] {
+        let update_file = target_dir.join(update_name);
+        if update_file.exists() {
+            let _ = fs::remove_file(&update_file);
+        }
     }
     let old_exe = target_dir.join("wengine-helper.exe.old");
     if old_exe.exists() {
@@ -873,6 +878,7 @@ pub fn run_uninstall(silent: bool) {
     let files = [
         "wengine-helper.exe.old",
         "wengine-helper.exe.update",
+        "wengine-helper.exe.update.zip",
         "wengine-plus.js",
         "wengine-token",
         "wengine-helper.log",

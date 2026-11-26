@@ -98,8 +98,8 @@ flowchart LR
 * **Download accounts** — choose a custom account, the built-in pool or anonymous access.
 * **Safe deletion** — active wallpapers are protected, paths are confined to the known wallpaper
   folders, and read-only Steam files are cleaned before removal.
-* **Self-updating** — a version chip in the title bar checks GitHub Releases, downloads the new
-  executable, replaces itself and reinstalls the frontend patch.
+* **Self-updating** — a version chip in the title bar checks GitHub Releases, downloads the release
+  archive, verifies its size and SHA-256 digest, replaces itself and reinstalls the frontend patch.
 * **Three UI languages** — English, Russian and Simplified Chinese for the WEngine-Plus strings; the
   rest of the interface follows Wallpaper Engine's own language setting.
 
@@ -120,8 +120,9 @@ registration.
 
 ### For end users
 
-1. Download `wengine-helper.exe` from the [**latest release**](https://github.com/psyattack/WEngine-Plus/releases/latest).
-2. Run it. The installer:
+1. Download and extract `WEngine-Plus-v<version>-Windows-x64.zip` from the
+   [**latest release**](https://github.com/psyattack/WEngine-Plus/releases/latest).
+2. Run the extracted `wengine-helper.exe`. The installer:
    - locates Wallpaper Engine through a running process, the Steam registry and library folders, or
      standard paths (with a folder picker as the last resort);
    - copies itself to `<Wallpaper Engine>\ui\dist\scripts\wengine-helper.exe`;
@@ -171,9 +172,10 @@ the module map, testing guidance and the overlay conventions.
 ## Updating and uninstalling
 
 The version chip in the Wallpaper Engine title bar checks GitHub Releases. When a newer release
-exists, clicking Update downloads it, validates the executable, replaces the helper, runs the new
-installer in silent mode and closes the Wallpaper Engine UI so the patch can be applied. You can also
-run a freshly downloaded release manually; existing sessions, accounts and metadata are kept.
+exists, clicking Update downloads the release archive, verifies its size and SHA-256 digest, extracts
+the new executable, replaces the helper, runs the new installer in silent mode and closes the
+Wallpaper Engine UI so the patch can be applied. You can also run a freshly downloaded release zip
+manually; existing sessions, accounts and metadata are kept.
 
 To uninstall, run `wengine-helper.exe --uninstall` (`--silent` for unattended removal) with Wallpaper
 Engine closed. The uninstaller removes the loader line, or restores `scripts.js.bak` when the
