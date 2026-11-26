@@ -219,7 +219,7 @@ WEngine-Plus/
 │   ├── main.rs              # 入口、模式分发、HTTP 路由与处理函数
 │   ├── setup.rs             # 安装、卸载与前端补丁
 │   ├── api_security.rs      # 来源/令牌校验与路径限制
-│   ├── logging.rs           # 轮转文件日志
+│   ├── logging.rs           # 有大小上限的日志
 │   ├── http.rs              # 共享出站 HTTP 客户端
 │   ├── dialog.rs            # 原生文件夹选择器
 │   ├── auth/                # Steam 会话、二维码/Cookie 登录、账号
@@ -257,7 +257,7 @@ WEngine-Plus/
 | `metadata.json` | 已安装壁纸的本地创意工坊元数据 |
 | `steam_session.json` | 已保存的 Steam 网页会话 |
 | `download_accounts.json` | 已保存的下载账号（密码不会写入磁盘） |
-| `wengine-helper.log` | 辅助服务日志，超过 4 MiB 时轮转为 `.old` |
+| `wengine-helper.log` | 辅助服务日志，单个文件上限 8 MiB（写满后删除较早的一半） |
 | `plugins/` | 自动下载的 DepotDownloaderMod 与 RePKG |
 | `dotnet/` | 仅在系统缺少运行时的情况下存在的便携版 .NET 运行时 |
 

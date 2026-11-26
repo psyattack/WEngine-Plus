@@ -876,7 +876,6 @@ pub fn run_uninstall(silent: bool) {
         "wengine-plus.js",
         "wengine-token",
         "wengine-helper.log",
-        "wengine-helper.log.old",
         "metadata.json",
         "steam_session.json",
         "download_accounts.json",

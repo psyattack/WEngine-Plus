@@ -228,7 +228,7 @@ WEngine-Plus/
 │   ├── main.rs              # Entry, mode dispatch, HTTP routes and handlers
 │   ├── setup.rs             # Installer, uninstaller and frontend patching
 │   ├── api_security.rs      # Origin/token guards and path containment
-│   ├── logging.rs           # Rotating file logger
+│   ├── logging.rs           # Size-capped file logger
 │   ├── http.rs              # Shared outbound HTTP client
 │   ├── dialog.rs            # Native folder picker
 │   ├── auth/                # Steam sessions, QR/cookie login, accounts
@@ -266,7 +266,7 @@ Everything lives in the Wallpaper Engine scripts directory:
 | `metadata.json` | Local workshop metadata for installed wallpapers |
 | `steam_session.json` | Saved Steam web session |
 | `download_accounts.json` | Saved download accounts (passwords are never written to disk) |
-| `wengine-helper.log` | Daemon log, rotated to `.old` at 4 MiB |
+| `wengine-helper.log` | Daemon log, one file capped at 8 MiB (the older half is dropped at the limit) |
 | `plugins/` | Auto-downloaded DepotDownloaderMod and RePKG |
 | `dotnet/` | Portable .NET runtime, only when no system runtime is available |
 

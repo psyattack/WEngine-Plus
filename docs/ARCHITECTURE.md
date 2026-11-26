@@ -130,7 +130,7 @@ file) cannot break the uninstall path.
 `run_uninstall` stops helper processes, then restores the frontend by stripping the loader from the
 current `scripts.js` when the result has no WEP markers; otherwise it copies `scripts.js.bak` back.
 After a successful restore the backup is removed. It then deletes the files WEngine-Plus owns —
-`wengine-helper.exe.old`, `.update`, `wengine-plus.js`, `wengine-token`, both log files,
+`wengine-helper.exe.old`, `.update`, `wengine-plus.js`, `wengine-token`, the log file,
 `metadata.json`, `steam_session.json`, `download_accounts.json` — and the `plugins/` and `dotnet/`
 trees. The running executable cannot delete itself on Windows, so a detached PowerShell process waits
 for the process id and removes it.
@@ -179,7 +179,7 @@ covers the write behavior.
 | `metadata.json` | `MetadataManager` | Pretty JSON through `metadata.json.tmp.<pid>`, `sync_all`, rename |
 | `steam_session.json` | `AuthManager` | Pretty JSON, rewritten on login/QR success, removed on logout |
 | `download_accounts.json` | `AccountsManager` | Pretty JSON; passwords are `skip_serializing` |
-| `wengine-helper.log` | `logging` | Append-only, rotated to `.old` above 4 MiB |
+| `wengine-helper.log` | `logging` | Single file, capped at 8 MiB; the older half is dropped at the limit |
 
 There is no `%LOCALAPPDATA%` state and no registry state beyond reading Wallpaper Engine's install
 location. The daemon is the only writer while it runs; the UI never edits these files directly.
@@ -548,10 +548,11 @@ unsigned executables, and the updater validates a download only by size and the 
 YYYY-MM-DD HH:MM:SS [LEVEL] message
 ```
 
-The level is informational only (the logger has no filter); the file rotates to
-`wengine-helper.log.old` when it exceeds 4 MiB. The daemon logs startup paths and version, detected
-Wallpaper Engine version, bind result, plugin and download outcomes, update steps and errors. It
-never logs tokens, cookies, passwords, HTML bodies or file contents — see
+The level is informational only (the logger has no filter). One log file is kept and capped at
+8 MiB: when the limit is reached, the older half is dropped down to a line boundary and writing
+continues, so the newest entries are always available. The daemon logs startup paths and version,
+detected Wallpaper Engine version, bind result, plugin and download outcomes, update steps and
+errors. It never logs tokens, cookies, passwords, HTML bodies or file contents — see
 [SECURITY.md](../SECURITY.md) for the reporting scope.
 
 Typical diagnostics:

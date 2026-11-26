@@ -258,8 +258,9 @@ for installed items. Wait a few minutes before retrying; logging in can also rai
 
 ### Where is the log?
 
-`<Wallpaper Engine>\ui\dist\scripts\wengine-helper.log`. It rotates to `wengine-helper.log.old` at
-4 MiB. The log contains identifiers and outcomes, never tokens, cookies, passwords or file contents.
+`<Wallpaper Engine>\ui\dist\scripts\wengine-helper.log`. It is a single file capped at 8 MiB: at the
+limit the older half is deleted and only the newest entries remain. The log contains identifiers and
+outcomes, never tokens, cookies, passwords or file contents.
 
 ### How do I reset the local data?
 
