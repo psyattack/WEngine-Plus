@@ -496,9 +496,18 @@ The patched `localeLoader` merges, lowest precedence first:
 
 Because WEP keys are namespaced `ui_wep_`, the engine dictionary can never overwrite them; a language
 without a WEP table simply shows English for WEP strings while keeping its own translations. There
-are three complete tables with 181 keys each: `en-us`, `ru-ru`, `zh-chs` (Simplified Chinese).
+are three complete tables with 187 keys each: `en-us`, `ru-ru`, `zh-chs` (Simplified Chinese).
 Traditional Chinese (`zh-cht`) is a Wallpaper Engine language but has no WEP table yet and therefore
 falls back to English.
+
+Workshop tag labels are resolved by the overlay, not by the daemon. A tag maps to
+`ui_workshop_tags_<normalized tag>` in the engine dictionary; the age ratings (`Everyone`,
+`Questionable`, `Mature`) map to the engine's `ui_workshop_tags_rating_*` keys; the tags the engine
+ships without a string (`3D`, `HDR`, `Puppet Warp`, `Media Integration`, `User Shortcut`,
+`Video Texture`) map to `ui_wep_tag_*`. A tag that no dictionary resolves is shown as its English
+name, never as a raw `ui_*` key. The filter chips and the installed-metadata pills use the same
+lookup, so a chip label and its pill label always agree; the value sent to Steam stays the English
+tag regardless.
 
 Conventions:
 

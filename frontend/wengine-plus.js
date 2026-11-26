@@ -3089,23 +3089,31 @@
         };
         // Display-only translation for tag chips. The filter value itself stays
         // the original English Workshop tag. Wallpaper Engine ships no locale
-        // strings for a few special tags, so they fall back to the ui_wep_*
-        // table instead of rendering the raw ui_workshop_tags_* key.
+        // strings for a few special tags and keeps the age ratings in a separate
+        // ui_workshop_tags_rating_* namespace, so those map through a fixed table
+        // instead of rendering the raw ui_workshop_tags_* key. A tag the engine
+        // dictionaries cannot translate falls back to the tag itself.
         W.tagLabelKeys = {
-          "3D": "ui_wep_tag_3d",
-          "Puppet Warp": "ui_wep_tag_puppet_warp",
-          "HDR": "ui_wep_tag_hdr",
-          "Media Integration": "ui_wep_tag_media_integration",
-          "User Shortcut": "ui_wep_tag_user_shortcut",
-          "Video Texture": "ui_wep_tag_video_texture"
+          "3d": "ui_wep_tag_3d",
+          "puppet warp": "ui_wep_tag_puppet_warp",
+          "hdr": "ui_wep_tag_hdr",
+          "media integration": "ui_wep_tag_media_integration",
+          "user shortcut": "ui_wep_tag_user_shortcut",
+          "video texture": "ui_wep_tag_video_texture",
+          "everyone": "ui_workshop_tags_rating_everyone",
+          "questionable": "ui_workshop_tags_rating_questionable",
+          "mature": "ui_workshop_tags_rating_mature"
         };
         W.getTagLabel = function (tag) {
-          var key = W.tagLabelKeys[tag];
-          if (key) {
-            var translated = O.instant(key);
-            if (translated && translated !== key) return translated;
-          }
-          return V.translateTagInstant(tag);
+          if (!tag) return "";
+          var name = String(tag).trim();
+          var lookup = name.toLowerCase();
+          var key = Object.prototype.hasOwnProperty.call(W.tagLabelKeys, lookup)
+            ? W.tagLabelKeys[lookup]
+            : "ui_workshop_tags_" + V.prepareTagForTranslation(name);
+          var translated = O.instant(key);
+          translated = translated ? translated.toString() : "";
+          return translated && translated !== key ? translated : name;
         };
         W.getWallpaperWorkshopId = function (w) {
           if (!w) return "";
